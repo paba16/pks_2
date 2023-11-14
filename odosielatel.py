@@ -2,6 +2,25 @@ import socket
 import threading
 import time
 import selectors
+from CyclicRedundancyCheck import CRC
+# todo vsetko prerobit na full-duplex
+#  full-duplex - posielanie sprav z oboch stran naraz
+#  preba to aj pre ack aj pre KeepAlive pocas posielania packetov
+#  pouzit select
+
+class Packet:
+    def __init__(self, flags, number, message, filename=None):
+        self.message = self.file_header(filename, message)
+
+        checksum = CRC(self.message)
+        self.header = bytes([flags, number, checksum // 256, checksum % 256])
+
+    @staticmethod
+    def file_header(filename, message):
+        if filename is None:
+            return message.encode("utf-8")
+        return filename.encode("utf-8") + bytes([0]) + message.encode("utf-8")
+
 
 def main():
     HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
@@ -29,27 +48,60 @@ Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mau
     dest_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dest_socket.connect((HOST, PORT))
 
+    # prijem odpovede na KeepALive
     src_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    src_socket.bind(("127.0.0.1", 0))
+    src_socket.bind(("127.0.0.1", 0))  # OS vyberie volny port
     src_socket.setblocking(False)
 
     p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
     p1.start()
 
     # pred odoslanim        max velkost je 1500 - 20 (IP) - 8 (UDP) - 4 (velkosť našej hlavičky)
-    # max velkost?   508 alebo 1468
+    # max velkost?   508 alebo 1468  - 508 minus hlavicka = 504
     segmenty = [0]
     i = 0
+    window_size = 128
     while segmenty[-1] < len(message):
-        max_velkost_packetu = int(input(f"Zadaj maximálnu veľkosť packetu medzi 1 a 504: "))
-        if 0 > max_velkost_packetu:
-            max_velkost_packetu = 1
-        elif 508 - 4 < max_velkost_packetu:
-            max_velkost_packetu = 508 - 4
+        # potrebujem buffer na segmenty
+        buffer = []
+        while segmenty[-1] < len(message) and i < window_size:
+            max_velkost_packetu = int(input(f"Zadaj maximálnu veľkosť packetu medzi 1 a 504: "))
+            if 0 > max_velkost_packetu:
+                max_velkost_packetu = 1
+            elif 508 - 4 < max_velkost_packetu:
+                max_velkost_packetu = 508 - 4
 
-        segmenty.append(segmenty[-1] + max_velkost_packetu)
-        dest_socket.send(bytes([0, i % 256, 0, 0]) + message[segmenty[-2]: segmenty[-1]].encode("utf-8"))
-        # print(message[start:start+max_velkost_packetu])
+            segmenty.append(segmenty[-1] + max_velkost_packetu)
+            sprava = Packet(0, i % 256, message[segmenty[-2]: segmenty[-1]])
+            buffer.append(sprava)
+            # print(message[start:start+max_velkost_packetu])
+
+            dest_socket.send(sprava.header + sprava.message)
+            i += 1
+
+        # dostavam ack a nack, potom odoslem,
+        #   proces opakuj
+        any_nack = True
+        resend = []
+        while any_nack:
+            any_nack = False
+
+            # prepošleme všetky packet s nack
+            for j in resend:
+                dest_socket.send(buffer[j % 128])
+
+            for j in range(window_size):
+                message = src_socket.recv(1024)  # todo size
+                # todo prerobit na samostatny system
+                #  na recv. Ak pocuvam tu, mozem dostat odpoved na KeepAlive
+                if message[0] & 1:  # ACK
+                    pass
+                elif message[0] & 2:  # NACK
+                    resend.append(int.from_bytes(message[4:], byteorder="big"))
+                    any_nack = True
+                elif message[0] & 4:  # todo KeepAlive
+                    pass
+        i %= 256
 
 
 def keepAlive(src_socket: socket.socket, dest_socket: socket.socket):
