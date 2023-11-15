@@ -8,12 +8,35 @@ from CyclicRedundancyCheck import CRC
 #  preba to aj pre ack aj pre KeepAlive pocas posielania packetov
 #  pouzit select
 
-class Packet:
-    def __init__(self, flags, number, message, filename=None):
-        self.message = self.file_header(filename, message)
+lock = threading.Lock()
+to_send = []
 
-        checksum = CRC(self.message)
-        self.header = bytes([flags, number, checksum // 256, checksum % 256])
+
+class Packet:
+    ACK = 1
+    NACK = 2
+    KEEP_ALIVE = 4
+    SWAP = 8
+
+    RTT = 5
+
+    def __init__(self, flags, number, message, filename=None):
+        message = self.file_header(filename, message)
+
+        checksum = CRC(message)
+        self._out = bytes([flags, number]) + int.to_bytes(checksum, length=16, byteorder="big") + message
+
+        self.timer = threading.Timer(Packet.RTT, self.resend)
+
+    def resend(self):
+        # todo check
+        self.timer = threading.Timer(Packet.RTT, self.resend)
+
+        with lock:
+            to_send.append(self)
+
+    def stop_timer(self):
+        self.timer.cancel()
 
     @staticmethod
     def file_header(filename, message):
@@ -21,10 +44,15 @@ class Packet:
             return message.encode("utf-8")
         return filename.encode("utf-8") + bytes([0]) + message.encode("utf-8")
 
+    @property
+    def out(self):
+        self.timer.start()
+        return self._out
+
 
 def main():
     HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
-    PORT = 9090  # int(input("Zadaj cieľový port")
+    PORT = 9052  # int(input("Zadaj cieľový port")
 
     CLIENT_HOST = "127.0.0.1"
     # CLIENT_PORT =
@@ -47,61 +75,55 @@ Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mau
 
     dest_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dest_socket.connect((HOST, PORT))
+    dest_socket.setblocking(False)
 
-    # prijem odpovede na KeepALive
     src_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     src_socket.bind(("127.0.0.1", 0))  # OS vyberie volny port
     src_socket.setblocking(False)
 
-    p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
-    p1.start()
+    vyber = selectors.DefaultSelector()
+    vyber.register(dest_socket, selectors.EVENT_WRITE)
+    vyber.register(src_socket, selectors.EVENT_READ)
+    
+    # p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
+    # p1.start()
 
     # pred odoslanim        max velkost je 1500 - 20 (IP) - 8 (UDP) - 4 (velkosť našej hlavičky)
     # max velkost?   508 alebo 1468  - 508 minus hlavicka = 504
-    segmenty = [0]
+    segmenty = []
     i = 0
-    window_size = 128
+    window_size = 4
+    velkost_packetu = 500
+    a = Packet(0,0,"ahoj")
+    b = a.out
+
+    # todo pridat odosielanie Keep Alive
+    # todo casovac pouziva RTT, asi ziskany z Keep Alive
+    #  rtt viem zistit aj z ack/nack
     while segmenty[-1] < len(message):
-        # potrebujem buffer na segmenty
-        buffer = []
-        while segmenty[-1] < len(message) and i < window_size:
-            max_velkost_packetu = int(input(f"Zadaj maximálnu veľkosť packetu medzi 1 a 504: "))
-            if 0 > max_velkost_packetu:
-                max_velkost_packetu = 1
-            elif 508 - 4 < max_velkost_packetu:
-                max_velkost_packetu = 508 - 4
-
-            segmenty.append(segmenty[-1] + max_velkost_packetu)
-            sprava = Packet(0, i % 256, message[segmenty[-2]: segmenty[-1]])
-            buffer.append(sprava)
-            # print(message[start:start+max_velkost_packetu])
-
-            dest_socket.send(sprava.header + sprava.message)
-            i += 1
-
-        # dostavam ack a nack, potom odoslem,
-        #   proces opakuj
-        any_nack = True
-        resend = []
-        while any_nack:
-            any_nack = False
-
-            # prepošleme všetky packet s nack
-            for j in resend:
-                dest_socket.send(buffer[j % 128])
-
-            for j in range(window_size):
-                message = src_socket.recv(1024)  # todo size
-                # todo prerobit na samostatny system
-                #  na recv. Ak pocuvam tu, mozem dostat odpoved na KeepAlive
-                if message[0] & 1:  # ACK
+        events = vyber.select()
+        for key, mask in events:
+            if mask & selectors.EVENT_READ:
+                if mask & Packet.ACK:
+                    packet = segmenty[0]  # todo rozdelit
+                    packet.stop_timer()
+                    # todo check
+                elif mask & Packet.NACK:
+                    packet = segmenty[0]  # todo rozdelit
+                    packet.stop_timer()
+                    packet.resend()
+                    # todo check
+                elif mask & Packet.KEEP_ALIVE:
+                    # todo zapisem do alive pamate
                     pass
-                elif message[0] & 2:  # NACK
-                    resend.append(int.from_bytes(message[4:], byteorder="big"))
-                    any_nack = True
-                elif message[0] & 4:  # todo KeepAlive
+                elif mask & Packet.SWAP:
+                    # todo zacneme prijimat packety
                     pass
-        i %= 256
+            elif mask & selectors.EVENT_WRITE:
+                # todo poslem segment a zapnem casovac
+                #  casovac je threading.Timer, potrebujem ho recyklovat
+                pass
+
 
 
 def keepAlive(src_socket: socket.socket, dest_socket: socket.socket):
