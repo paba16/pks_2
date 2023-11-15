@@ -22,7 +22,7 @@ class Packet:
 
     RTT = 5  # todo menit?
 
-    def __init__(self, end_index, flags, number, message, ack=False):
+    def __init__(self, end_index, flags, number, message):
         self.flags = flags
         self.number = number  # poradie % Packet.WINDOW_SIZE
         self.checksum: int = CRC(message)
@@ -30,16 +30,15 @@ class Packet:
 
         # znaci cast pokial obsahuje text
         self.end_index = end_index
-        # iba pre nulty (neodoslany) segment, znaci end_index
-        self.ack = ack
+        self.ack = False
 
         self.timer = threading.Timer(Packet.RTT, self.resend)
 
     @staticmethod
     def file_header(filename, message):
         if filename is None:
-            return message.encode("utf-8")
-        return filename.encode("utf-8") + bytes([0]) + message.encode("utf-8")
+            return message
+        return filename.encode("utf-8") + bytes([0]) + message
     
     def resend(self):
         """
@@ -61,32 +60,32 @@ class Packet:
 
     def out(self):
         _out = (bytes([self.flags, self.number])
-                + int.to_bytes(self.checksum, length=16, byteorder="big")
+                + int.to_bytes(self.checksum, length=2, byteorder="big")
                 + self.message)
         self.timer.start()
         return _out
 
 
 class Sender:
-    def __init__(self, host, port, own_addr, message, is_file, file_name=None):
-        self.message = message
+    def __init__(self, host, port, message, is_file, file_name=None):
+        self.message = message.encode("utf-8")
+        print(self.message)
+        print(len(self.message))
         self.is_file = is_file
         self.file_name = file_name
 
         # pri inicializacii mame packet oznacujuci zaciatok spravy na 0. byte
-        self.datagrams = [Packet(0, 0, 0, b'', ack=True)]
+        self.datagrams = [Packet(0, 0, 0, b'')]
 
+        # todo upravit nazov
+        #  tento socket odosiela a prijima, je v kontakte s prijimatelom
         self.dest_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.dest_socket.connect((host, port))
         self.dest_socket.setblocking(False)
 
-        self.src_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.src_socket.bind((own_addr, 0))  # OS vyberie nas port
-        self.src_socket.setblocking(False)
-
         self.selector = selectors.DefaultSelector()
-        self.selector.register(self.dest_socket, selectors.EVENT_WRITE)
-        self.selector.register(self.src_socket, selectors.EVENT_READ)
+        self.selector.register(self.dest_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
+        # self.selector.register(self.dest_socket, selectors.EVENT_READ)
 
         self.is_alive = [True * 3]
         # todo start Keep Alive
@@ -155,25 +154,32 @@ class Sender:
 
                 elif mask & selectors.EVENT_WRITE:
                     conn = key.fileobj
-                    if len(to_resend) == 0:
+                    if len(to_resend) != 0:
                         # bud preposlem stary segment
                         with resend_lock:
-                            item = to_resend.pop(0)
+                            item = to_resend.pop(0).out()
                         conn.send(item)
 
                     elif len(self.datagrams) < Packet.WINDOW_SIZE:
                         # alebo poslem novy
                         start = self.datagrams[-1].end_index
                         end = start + packet_size
+                        # todo debug, na zaciatku su 2 divne byty
                         if i == 0:
                             self.datagrams.pop(0)  # odstranime nulty segment
-                            if self.is_file:
+                            if self.is_file == 1:
                                 # pri subore vlozime nazov suboru
+                                print("FUCK")
                                 end -= len(self.file_name) + 1
-                                self.message = Packet.file_header(self.file_name, self.message[:end])
+                                message = Packet.file_header(self.file_name, self.message[:end])
+                            else:
+                                message = self.message[start:end]
+                        else:
+                            message = self.message[start:end]
 
-                        self.datagrams.append(Packet(end, self.is_file << 7, i, self.message))
-                        conn.send(self.datagrams[-1])
+                        self.datagrams.append(Packet(end, self.is_file << 7, i, message))
+
+                        conn.send(self.datagrams[-1].out())
 
                         i = (i + 1) % Packet.WINDOW_SIZE
 
@@ -215,10 +221,7 @@ class Sender:
 
 def main():
     HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
-    PORT = 9052  # int(input("Zadaj cieľový port")
-
-    CLIENT_HOST = "127.0.0.1"
-    CLIENT_PORT = 0
+    PORT = 9053  # int(input("Zadaj cieľový port")
 
     is_file = 0
     # is_file = int(input(
@@ -231,9 +234,15 @@ def main():
             message = file.read()
     else:
         file_name = None
-        message = input("Zadaj spravu ktoru chces poslat:\n")
+        # message = input("Zadaj spravu ktoru chces poslat:\n")
+        message = """\
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum nulla ornare, rutrum purus id, imperdiet libero. Curabitur eros lectus, blandit vitae justo malesuada, lacinia vulputate nisl. Maecenas et neque vitae neque imperdiet tempor id vel magna. Fusce magna neque, viverra a urna nec, egestas varius ex. Quisque vitae viverra massa. Proin lobortis facilisis metus vel semper. Duis cursus pulvinar euismod. Ut rhoncus porta nibh, a placerat velit commodo vel. Morbi ac urna dui. Nunc iaculis elementum odio et efficitur. Praesent bibendum eros eget neque bibendum ultrices sed sit amet est. Quisque venenatis turpis vel magna vestibulum convallis ac id erat. Donec fringilla eu ex cursus hendrerit. Nam lacinia a diam at blandit. Vestibulum et orci laoreet, eleifend tortor ut, faucibus ex.
+Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.
+Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
+Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
+Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur."""
 
-    s = Sender(HOST, PORT, CLIENT_HOST, message, is_file, file_name=file_name)
+    s = Sender(HOST, PORT, message, is_file, file_name=file_name)
     s.send()
 
     # p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
@@ -241,8 +250,6 @@ def main():
 
     # pred odoslanim        max velkost je 1500 - 20 (IP) - 8 (UDP) - 4 (velkosť našej hlavičky)
     # max velkost?   508 alebo 1468  - 508 minus hlavicka = 504
-
-    i = 0
 
 
 if __name__ == "__main__":
