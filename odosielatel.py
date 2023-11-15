@@ -20,12 +20,11 @@ class Packet:
     SWAP = 8
     WINDOW_SIZE = 8
 
-    RTT = 5
+    RTT = 5  # todo menit?
 
     def __init__(self, end_index, flags, number, message, ack=False):
         self.flags = flags
-        # poradie packetu, nasledne pouzity zysok po deleni s window_size
-        self._number = number
+        self.number = number  # poradie % Packet.WINDOW_SIZE
         self.checksum: int = CRC(message)
         self.message = message
 
@@ -36,10 +35,6 @@ class Packet:
 
         self.timer = threading.Timer(Packet.RTT, self.resend)
 
-    @property
-    def number(self):
-        return self._number % Packet.WINDOW_SIZE
-
     @staticmethod
     def file_header(filename, message):
         if filename is None:
@@ -47,6 +42,10 @@ class Packet:
         return filename.encode("utf-8") + bytes([0]) + message.encode("utf-8")
     
     def resend(self):
+        """
+        Vytvori novy casovac a prida datagram ku packetom na znovu odoslanie
+        :return:
+        """
         global to_resend
         self.timer = threading.Timer(Packet.RTT, self.resend)
 
@@ -54,6 +53,10 @@ class Packet:
             to_resend.append(self)
 
     def stop_timer(self):
+        """
+        Zastavi casovac
+        :return:
+        """
         self.timer.cancel()
 
     def out(self):
@@ -70,64 +73,81 @@ class Sender:
         self.is_file = is_file
         self.file_name = file_name
 
-        self.datagramy = []
+        # pri inicializacii mame packet oznacujuci zaciatok spravy na 0. byte
+        self.datagrams = [Packet(0, 0, 0, b'', ack=True)]
 
-        self.dest_port = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.dest_port.connect((host, port))
-        self.dest_port.setblocking(False)
+        self.dest_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.dest_socket.connect((host, port))
+        self.dest_socket.setblocking(False)
 
-        self.src_port = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.src_port.bind((own_addr, 0))  # OS vyberie nas port
-        self.src_port.setblocking(False)
+        self.src_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.src_socket.bind((own_addr, 0))  # OS vyberie nas port
+        self.src_socket.setblocking(False)
 
-        self.vyber = selectors.DefaultSelector()
-        self.vyber.register(self.dest_port, selectors.EVENT_WRITE)
-        self.vyber.register(self.src_port, selectors.EVENT_READ)
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.dest_socket, selectors.EVENT_WRITE)
+        self.selector.register(self.src_socket, selectors.EVENT_READ)
+
+        self.is_alive = [True * 3]
         # todo start Keep Alive
-        
+
+    def get_number_packet(self, number):
+        i = 0
+        while number != self.datagrams[i].number:
+            if i >= Packet.WINDOW_SIZE:
+                raise LookupError("hladany packet sa nenasiel")
+            i += 1
+        return i
+
     def send(self):
-        velkost_packetu = 500
+        packet_size = 500
+        i = 0
 
         # todo pridat odosielanie Keep Alive
         # todo casovac pouziva RTT, asi ziskany z Keep Alive
         #  rtt viem zistit aj z ack/nack
 
         # todo zmenit while loop
-        while self.datagramy[-1].end_index < len(self.message):
-            events = self.vyber.select()
+        while self.datagrams[-1].end_index < len(self.message):
+            events = self.selector.select()
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
                     conn = key.fileobj
 
-                    # dostaneme naspat hlavicku
-                    message = conn.recv(velkost_packetu)
+                    # dostaneme naspat hlavicku s nulovym checksum
+                    message = conn.recv(packet_size)
+
                     if message[0] & Packet.ACK:
-                        packet = self.datagramy[0]  # todo rozdelit
+                        # zistime ktory packet z okna sme prijali
+                        k = self.get_number_packet(message[1])
+                        packet = self.datagrams[k]
+
                         packet.stop_timer()
 
                         # spocitame pocet packetov za sebou s ACK od prveho
                         j = 0
-                        while self.datagramy[j].ack and j < Packet.WINDOW_SIZE:
+                        while self.datagrams[j].ack and j < Packet.WINDOW_SIZE:
                             j += 1
-
+                        
+                        # nasledne tieto packety odstranime z okna
                         for k in range(j):
-                            self.datagramy.pop(0)
-
-                        # todo odstranit z okna dany prvok
-                        #  otazka je ako s prepoctom medzi vecami
-                        #
+                            self.datagrams.pop(0)
 
                         # todo upravit RTT
                     elif message[0] & Packet.NACK:
+                        # zistime ktory packet z okna sme prijali
+                        k = self.get_number_packet(message[1])
+                        packet = self.datagrams[k]
 
-                        packet = self.datagramy[0]  # todo rozdelit
                         packet.stop_timer()
                         packet.resend()
-                        # todo check
+
                         # todo upravit RTT
                     elif message[0] & Packet.KEEP_ALIVE:
-                        # todo zapisem do alive pamate
-                        pass
+                        self.is_alive[-1] = True
+                        # todo kde exit ak nie sme alive?
+                        #  check any(self.is_alive) pred odoslanim
+
                     elif message[0] & Packet.SWAP:
                         # todo zacneme prijimat packety
                         # todo spytat sa presnejsie
@@ -141,33 +161,31 @@ class Sender:
                             item = to_resend.pop(0)
                         conn.send(item)
 
-                    elif len(self.datagramy) < Packet.WINDOW_SIZE:
+                    elif len(self.datagrams) < Packet.WINDOW_SIZE:
                         # alebo poslem novy
-                        start = self.datagramy[-1].end_index
-                        end = start + velkost_packetu
+                        start = self.datagrams[-1].end_index
+                        end = start + packet_size
                         if i == 0:
-                            self.datagramy.pop(0)  # odstranime nulty segment
+                            self.datagrams.pop(0)  # odstranime nulty segment
                             if self.is_file:
                                 # pri subore vlozime nazov suboru
                                 end -= len(self.file_name) + 1
-                                message = Packet.file_header(self.file_name, message[:end])
+                                self.message = Packet.file_header(self.file_name, self.message[:end])
 
-                        self.datagramy.append(Packet(end, self.is_file << 7, i, message))
-                        conn.send(self.datagramy[-1])
+                        self.datagrams.append(Packet(end, self.is_file << 7, i, self.message))
+                        conn.send(self.datagrams[-1])
 
                         i = (i + 1) % Packet.WINDOW_SIZE
 
-                    # todo nedobre
-                    # casovac je threading.Timer, neda sa spustit znovu
+                    # todo check
 
-    def keepAlive(self):
+    def keep_alive(self):
         # todo prerobit cele
         """
         Kazdych interval sekund posle packet s KeepAlive značkou
 
         Pomocou zvyšku po delení času intervalom zaisťujeme odoslanie v priemere každých interval sekúnd.
 
-        :param dest_socket:
         :return:
         """
         sel = selectors.DefaultSelector()
@@ -215,9 +233,8 @@ def main():
         file_name = None
         message = input("Zadaj spravu ktoru chces poslat:\n")
 
-
     s = Sender(HOST, PORT, CLIENT_HOST, message, is_file, file_name=file_name)
-
+    s.send()
 
     # p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
     # p1.start()
@@ -226,9 +243,6 @@ def main():
     # max velkost?   508 alebo 1468  - 508 minus hlavicka = 504
 
     i = 0
-    window_size = Packet.WINDOW_SIZE
-
-    segmenty = [Packet(0, 0, 0, b'', ack=True)]
 
 
 if __name__ == "__main__":
