@@ -30,12 +30,6 @@ class Packet:
         self.ack = False
 
         self.timer = threading.Timer(Packet.RTT, self.resend)
-
-    @staticmethod
-    def file_message(filename, message):
-        if filename is None:
-            return message.encode("utf-8")
-        return filename.encode("utf-8") + bytes([0]) + message.encode()
     
     def resend(self):
         """
@@ -58,7 +52,7 @@ class Packet:
     def out(self):
         """
         vytvori spravu na odoslanie
-        zapne casovac hned pred vratenim spravi
+        zapne casovac hned pred vratenim spravy
         :return: 
         """
         _out = (bytes([self.flags, self.number])
@@ -70,7 +64,7 @@ class Packet:
 
 class Sender:
     def __init__(self, host, port, message, is_file, file_name=None):
-        self.message = Packet.file_message(file_name, message)
+        self.message = self.construct_message(file_name, message)
         self.last_sent_index = 0
 
         self.is_file = is_file
@@ -92,6 +86,12 @@ class Sender:
         self.alive_thread = threading.Thread(target=self.keep_alive)
         self.alive_thread.start()
 
+    @staticmethod
+    def construct_message(filename, message):
+        if filename is None:
+            return message.encode("utf-8")
+        return filename.encode("utf-8") + bytes([0]) + message.encode()
+
     def get_number_packet(self, number):
         i = 0
         while number != self.datagrams[i].number:
@@ -101,7 +101,7 @@ class Sender:
         return i
 
     def send(self):
-        packet_size = 1  # todo packet size
+        packet_size = 500  # todo packet size
         i = 0
 
         # todo pridat odosielanie Keep Alive
@@ -175,7 +175,10 @@ class Sender:
 
                         if start == 0 and self.is_file == 1:
                             flags |= Packet.FILE
-                        elif end == len(self.message):
+
+                        # todo over ako funguje message[900: 2000] ak konci pri 1000
+                        if end >= len(self.message):
+                            print("Fin")
                             flags |= Packet.FINISH
 
                         message = self.message[start:end]
@@ -223,15 +226,14 @@ def main():
     #      "   1   -   subor\n")))
     if is_file == 1:
         file_name = input("zadaj absolutnu cestu k suboru: ")
-        # with open(file_name) as file:
-        #     message = file.read()
-        message = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+        with open(file_name) as file:
+            message = file.read()
 
         # z file_name odrezeme obsah po poslednu uvodzovku
         file_name = file_name[len(file_name) - file_name[::-1].index("\\"):]
     else:
         file_name = None
-        # message = input("Zadaj spravu ktoru chces poslat:\n")
+        message = input("Zadaj spravu ktoru chces poslat:\n")
         message = """\
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum nulla ornare, rutrum purus id, imperdiet libero. Curabitur eros lectus, blandit vitae justo malesuada, lacinia vulputate nisl. Maecenas et neque vitae neque imperdiet tempor id vel magna. Fusce magna neque, viverra a urna nec, egestas varius ex. Quisque vitae viverra massa. Proin lobortis facilisis metus vel semper. Duis cursus pulvinar euismod. Ut rhoncus porta nibh, a placerat velit commodo vel. Morbi ac urna dui. Nunc iaculis elementum odio et efficitur. Praesent bibendum eros eget neque bibendum ultrices sed sit amet est. Quisque venenatis turpis vel magna vestibulum convallis ac id erat. Donec fringilla eu ex cursus hendrerit. Nam lacinia a diam at blandit. Vestibulum et orci laoreet, eleifend tortor ut, faucibus ex.
 Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.

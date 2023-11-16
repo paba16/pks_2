@@ -79,7 +79,6 @@ class SelectiveRepeatARQ:
             text = self.message[separator+1:].decode("utf-8")
             with open(cesta + filename, "w") as txt:
                 txt.write(text)
-            pass
         else:
             print(self.message.decode("utf-8"))
 
