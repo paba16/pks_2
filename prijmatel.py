@@ -7,6 +7,7 @@ class SelectiveRepeatARQ:
     # todo konst zo suboru
     ACK = 1
     NACK = 1 << 1
+    FILE = 1 << 7
     window_size = 8
     buffer_size = 2 * window_size
 
@@ -32,6 +33,12 @@ class SelectiveRepeatARQ:
             return bytes([self.NACK, seq, 0, 0])
 
         if self.current_window.get(seq, False) is not False:
+            # ak sa datagram nachadza v ocakavanom okne
+
+            # pri prvok datagrame overime ci je sprava subor
+            if self.message == b'' and not self.is_file:
+                self.is_file = header[0] & self.FILE  # todo zo suboru
+
             self.current_window[seq] = data
             self.message += data
 

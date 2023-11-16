@@ -216,15 +216,19 @@ def main():
     HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
     PORT = 9053  # int(input("Zadaj cieľový port")
 
-    is_file = 0
+    is_file = 1
     # is_file = int(input(
     #     ("Vyber si typ komunikacie:\n"
     #      "   0   -   sprava\n"
     #      "   1   -   subor\n")))
     if is_file == 1:
         file_name = input("zadaj absolutnu cestu k suboru: ")
-        with open(file_name) as file:
-            message = file.read()
+        # with open(file_name) as file:
+        #     message = file.read()
+        message = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+
+        # z file_name odrezeme obsah po poslednu uvodzovku
+        file_name = file_name[len(file_name) - file_name[::-1].index("\\"):]
     else:
         file_name = None
         # message = input("Zadaj spravu ktoru chces poslat:\n")
@@ -234,7 +238,6 @@ Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec 
 Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
 Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
 Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur."""
-    # message = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
     s = Sender(HOST, PORT, message, is_file, file_name=file_name)
     s.send()
 
