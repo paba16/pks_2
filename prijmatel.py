@@ -4,6 +4,7 @@ from CyclicRedundancyCheck import CRC
 
 
 class SelectiveRepeatARQ:
+    # todo konst zo suboru
     ACK = 1
     NACK = 1 << 1
     window_size = 8
@@ -30,34 +31,30 @@ class SelectiveRepeatARQ:
         if (checksum ^ CRC(data)) != 0:
             return bytes([self.NACK, seq, 0, 0])
 
-        # if self.window_size <= self.expected_seq < 2 * self.window_size:
-        # todo aky je dobry range?
-        #  moze byt aj loopback napr  6, 7, 0, 1,
-        #  pozri poznamky
         if self.current_window.get(seq, False) is not False:
             self.current_window[seq] = data
             self.message += data
-
-
-            keys = self.current_window.__iter__()
 
             i = 0
             first = next(iter(self.current_window))
             last = next(reversed(self.current_window))
 
-            # od prveho prvku odstrani
+            # todo da sa lepsie?
+            keys = iter(self.current_window.values())
+
+            # odstrani od prveho retazove acky
+            # todo praca na vysvetleniach
             while next(keys) is not None:
+
                 self.old_window.pop((first + i + self.window_size) % self.buffer_size)
                 self.old_window[(first + i) % self.buffer_size] = self.current_window.pop((first + i) % self.buffer_size)
                 self.current_window[(last + i + 1) % self.buffer_size] = None
                 i += 1
 
+                keys = iter(self.current_window.values())
+
             return bytes([self.ACK, seq, 0, 0])
         else:
-            #  nack takto?
-            #  ma to byt nack? zatial ack
-            #  prerobit na overenie ci uz tento packet mame?
-
             # buffer je 2x okno, najdem packet s number, ak sa rovna, dostane ack, inak nack
             old_data = self.old_window.get(seq)
 
@@ -81,7 +78,9 @@ class SelectiveRepeatARQ:
 
 
 class Reciever:
+    # todo konst zo suboru
     WINDOW_SIZE = 8
+
     def __init__(self, host, port):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.server.bind((host, port))
@@ -91,21 +90,19 @@ class Reciever:
     def recieve(self):
         while True:
             message, source = self.server.recvfrom(509)  # todo size
-            if message[0] & 4:  # todo  bity z arq
+            if message[0] & 4:  # todo  bity zo suboru
                 # posle spat Keep alive
                 self.server.sendto(bytes([4, 0, 0, 0]), source)
                 print("KL")
-            elif message[0] & 8:  # todo bity z arq
+            elif message[0] & 8:  # todo bity zo suboru
                 # todo neopakuj kod repeatu
-                # self.arq
+                self.server.sendto(self.arq.check(message), source)
 
                 self.arq.output()
                 break
                 # todo ukoncili sme komunikaciu?
             else:
                 self.server.sendto(self.arq.check(message), source)
-                # print(message)
-                print(source, message[:4], message[4:].decode("utf-8"))
 
 
 def main():
