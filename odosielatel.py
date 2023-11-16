@@ -4,24 +4,22 @@ import time
 import selectors
 from CyclicRedundancyCheck import CRC
 
-# todo vsetko prerobit na full-duplex
-#  full-duplex - posielanie sprav z oboch stran naraz
-#  preba to aj pre ack aj pre KeepAlive pocas posielania packetov
-#  pouzit select
-
 resend_lock = threading.Lock()
 to_resend = []
 
 
 class Packet:
+    # todo tieto konstanty v samostatnom subore
     ACK = 1 << 0
     NACK = 1 << 1
     KEEP_ALIVE = 1 << 2
     FINISH = 1 << 3
     SWAP = 1 << 4
+    FILE = 1 << 7
     WINDOW_SIZE = 8
+    BUFFER_SIZE = 2 * WINDOW_SIZE
 
-    RTT = 1  # todo menit?
+    RTT = 1000  # todo menit?
 
     def __init__(self, flags, number, message):
         self.flags = flags
@@ -34,10 +32,10 @@ class Packet:
         self.timer = threading.Timer(Packet.RTT, self.resend)
 
     @staticmethod
-    def file_header(filename, message):
+    def file_message(filename, message):
         if filename is None:
-            return message
-        return filename.encode("utf-8") + bytes([0]) + message
+            return message.encode("utf-8")
+        return filename.encode("utf-8") + bytes([0]) + message.encode()
     
     def resend(self):
         """
@@ -58,6 +56,11 @@ class Packet:
         self.timer.cancel()
 
     def out(self):
+        """
+        vytvori spravu na odoslanie
+        zapne casovac hned pred vratenim spravi
+        :return: 
+        """
         _out = (bytes([self.flags, self.number])
                 + int.to_bytes(self.checksum, length=2, byteorder="big")
                 + self.message)
@@ -67,11 +70,10 @@ class Packet:
 
 class Sender:
     def __init__(self, host, port, message, is_file, file_name=None):
-        self.message = message.encode("utf-8")
+        self.message = Packet.file_message(file_name, message)
         self.last_sent_index = 0
 
         self.is_file = is_file
-        self.file_name = file_name
 
         # pri inicializacii mame packet oznacujuci zaciatok spravy na 0. byte
         self.datagrams = []
@@ -84,10 +86,9 @@ class Sender:
 
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.dest_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
-        # self.selector.register(self.dest_socket, selectors.EVENT_READ)
 
         self.is_alive = [True] * 3
-        # todo start Keep Alive
+
         self.alive_thread = threading.Thread(target=self.keep_alive)
         self.alive_thread.start()
 
@@ -152,7 +153,7 @@ class Sender:
 
                     elif message[0] & Packet.SWAP:
                         # todo zacneme prijimat packety
-                        # todo spytat sa presnejsie
+                        # todo spytat sa co a ako
                         pass
 
                 if mask & selectors.EVENT_WRITE:
@@ -165,33 +166,28 @@ class Sender:
                         conn.send(item)
 
                     elif len(self.datagrams) < Packet.WINDOW_SIZE:
-                        print("write", [i.ack for i in self.datagrams])
                         # alebo poslem novy
+                        flags = 0
+                        # print("write", [i.ack for i in self.datagrams])
+
                         start = self.last_sent_index
                         end = start + packet_size
-                        # todo debug, na zaciatku su 2 divne byty
-                        if i == 0:
-                            if self.is_file == 1:
-                                # pri subore vlozime nazov suboru
-                                # todo odosielanie file_name po 1 byte
-                                end -= len(self.file_name) + 1
-                                message = Packet.file_header(self.file_name, self.message[:end])
-                            else:
-                                message = self.message[start:end]
-                        else:
-                            message = self.message[start:end]
 
-                        self.datagrams.append(Packet(self.is_file << 7, i, message))
-                        self.last_sent_index += packet_size
+                        if start == 0 and self.is_file == 1:
+                            flags |= Packet.FILE
+                        elif end == len(self.message):
+                            flags |= Packet.FINISH
+
+                        message = self.message[start:end]
+
+                        self.datagrams.append(Packet(flags, i, message))
+                        self.last_sent_index = end
 
                         conn.send(self.datagrams[-1].out())
 
-                        i = (i + 1) % Packet.WINDOW_SIZE
-
-                    # todo check
+                        i = (i + 1) % Packet.BUFFER_SIZE
 
     def keep_alive(self):
-        # todo prerobit cele
         """
         Kazdych interval sekund posle packet s KeepAlive značkou
 
@@ -202,12 +198,11 @@ class Sender:
         interval = 5
         start_time = time.monotonic()
         while any(self.is_alive):
-            start = time.monotonic()
+            # start = time.monotonic()
             self.dest_socket.send(bytes([4, 0, 0, 0]))
-            # print(self.is_alive, end="\t")
+
             self.is_alive.pop(0)
             self.is_alive.append(False)
-            # print(self.is_alive)
 
             time.sleep((interval - (time.monotonic() - start_time) % interval))
 
@@ -239,7 +234,7 @@ Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec 
 Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
 Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
 Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur."""
-
+    # message = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
     s = Sender(HOST, PORT, message, is_file, file_name=file_name)
     s.send()
 
