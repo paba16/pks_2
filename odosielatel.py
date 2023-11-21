@@ -2,6 +2,8 @@ import socket
 import threading
 import time
 import selectors
+
+from LDProtocol import LDProtocol
 from CyclicRedundancyCheck import CRC
 
 resend_lock = threading.Lock()
@@ -9,35 +11,25 @@ to_resend = []
 
 
 class Packet:
-    # todo tieto konstanty v samostatnom subore
-    ACK = 1 << 0
-    NACK = 1 << 1
-    KEEP_ALIVE = 1 << 2
-    FINISH = 1 << 3
-    SWAP = 1 << 4
-    FILE = 1 << 7
-    WINDOW_SIZE = 8
-    BUFFER_SIZE = 2 * WINDOW_SIZE
-
-    RTT = 1000  # todo menit?
+    RTT = 5  # todo menit?
 
     def __init__(self, flags, number, message):
         self.flags = flags
-        self.number = number  # poradie % Packet.WINDOW_SIZE
-        self.checksum: int = CRC(message)
+        self.number = number  # poradie % LDProtocol.WINDOW_SIZE
+        self.checksum = CRC(message)
         self.message = message
 
         self.ack = False
 
-        self.timer = threading.Timer(Packet.RTT, self.resend)
+        self.timer = threading.Timer(Packet.RTT, self.reschedule)
     
-    def resend(self):
+    def reschedule(self):
         """
         Vytvori novy casovac a prida datagram ku packetom na znovu odoslanie
         :return:
         """
         global to_resend
-        self.timer = threading.Timer(Packet.RTT, self.resend)
+        self.timer = threading.Timer(Packet.RTT, self.reschedule)
 
         with resend_lock:
             to_resend.append(self)
@@ -63,7 +55,7 @@ class Packet:
 
 
 class Sender:
-    def __init__(self, host, port, message, is_file, file_name=None):
+    def __init__(self, host=None, port=None, message=None, is_file=None, file_name=None, sock=None):
         self.message = self.construct_message(file_name, message)
         self.last_sent_index = 0
 
@@ -72,18 +64,24 @@ class Sender:
         # pri inicializacii mame packet oznacujuci zaciatok spravy na 0. byte
         self.datagrams = []
 
-        # todo upravit nazov
-        #  tento socket odosiela a prijima, je v kontakte s prijimatelom
-        self.dest_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.dest_socket.connect((host, port))
-        self.dest_socket.setblocking(False)
+        if sock is None:
+            self.comm_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        else:
+            self.comm_socket = sock
+
+        self.comm_socket.connect((host, port))
+        self.comm_socket.setblocking(False)
 
         self.selector = selectors.DefaultSelector()
-        self.selector.register(self.dest_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
+        self.selector.register(self.comm_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
 
         self.is_alive = [True] * 3
 
         self.alive_thread = threading.Thread(target=self.keep_alive)
+        self.send_keep_alive = threading.Event()
+
+        # nastavi vlajku na fungovanie a spusti
+        self.send_keep_alive.set()
         self.alive_thread.start()
 
     @staticmethod
@@ -95,7 +93,7 @@ class Sender:
     def get_number_packet(self, number):
         i = 0
         while number != self.datagrams[i].number:
-            if i >= Packet.WINDOW_SIZE:
+            if i >= LDProtocol.WINDOW_SIZE:
                 raise LookupError("hladany packet sa nenasiel")
             i += 1
         return i
@@ -104,12 +102,11 @@ class Sender:
         packet_size = 500  # todo packet size
         i = 0
 
-        # todo pridat odosielanie Keep Alive
         # todo casovac pouziva RTT, asi ziskany z Keep Alive
         #  rtt viem zistit aj z ack/nack
 
-        # todo zmenit while loop
         # todo while loop neposle outstanding resend packets
+        #  neriesi exit ak nie sme alive
         while self.last_sent_index < len(self.message):
             events = self.selector.select()
             for key, mask in events:
@@ -119,7 +116,7 @@ class Sender:
                     # dostaneme naspat hlavicku s nulovym checksum
                     message = conn.recv(4)
 
-                    if message[0] & Packet.ACK:
+                    if message[0] & LDProtocol.ACK:
                         # zistime ktory packet z okna sme prijali
                         k = self.get_number_packet(message[1])
                         packet = self.datagrams[k]
@@ -137,23 +134,27 @@ class Sender:
                             self.datagrams.pop(0)
 
                         # todo upravit RTT
-                    elif message[0] & Packet.NACK:
+                    elif message[0] & LDProtocol.NACK:
                         # zistime ktory packet z okna sme prijali
                         k = self.get_number_packet(message[1])
                         packet = self.datagrams[k]
 
                         packet.stop_timer()
-                        packet.resend()
+                        packet.reschedule()
 
                         # todo upravit RTT
-                    elif message[0] & Packet.KEEP_ALIVE:
+                    elif message[0] & LDProtocol.KEEP_ALIVE:
                         self.is_alive[-1] = True
                         # todo kde exit ak nie sme alive?
                         #  check any(self.is_alive) pred odoslanim
 
-                    elif message[0] & Packet.SWAP:
-                        # todo zacneme prijimat packety
-                        # todo spytat sa co a ako
+                    elif message[0] & LDProtocol.SWAP:
+                        # todo pozastavime alive_thread
+                        #   zapneme vlastneho prijimatela
+                        #   po ukonceni prijimatela znovu zapneme alive_thread
+                        # self.send_keep_alive.set()
+                        # todo prepneme sa na prijimatela
+                        # self.send_keep_alive.clear()
                         pass
 
                 if mask & selectors.EVENT_WRITE:
@@ -165,7 +166,7 @@ class Sender:
                             item = to_resend.pop(0).out()
                         conn.send(item)
 
-                    elif len(self.datagrams) < Packet.WINDOW_SIZE:
+                    elif len(self.datagrams) < LDProtocol.WINDOW_SIZE:
                         # alebo poslem novy
                         flags = 0
                         # print("write", [i.ack for i in self.datagrams])
@@ -174,13 +175,14 @@ class Sender:
                         end = start + packet_size
 
                         if start == 0 and self.is_file == 1:
-                            flags |= Packet.FILE
+                            flags |= LDProtocol.FILE
 
-                        # todo over ako funguje message[900: 2000] ak konci pri 1000
                         if end >= len(self.message):
                             print("Fin")
-                            flags |= Packet.FINISH
+                            flags |= LDProtocol.FIN
 
+                        # out of range slicing is handled graceffully
+                        # [][999:-999] = [][len([]): -len([])]
                         message = self.message[start:end]
 
                         self.datagrams.append(Packet(flags, i, message))
@@ -188,7 +190,7 @@ class Sender:
 
                         conn.send(self.datagrams[-1].out())
 
-                        i = (i + 1) % Packet.BUFFER_SIZE
+                        i = (i + 1) % LDProtocol.BUFFER_SIZE
 
     def keep_alive(self):
         """
@@ -202,7 +204,7 @@ class Sender:
         start_time = time.monotonic()
         while any(self.is_alive):
             # start = time.monotonic()
-            self.dest_socket.send(bytes([4, 0, 0, 0]))
+            self.comm_socket.send(bytes([4, 0, 0, 0]))
 
             self.is_alive.pop(0)
             self.is_alive.append(False)
@@ -212,11 +214,13 @@ class Sender:
             # print(time.monotonic() - start)
 
         # todo ako po ukonceni odosielania?
-        print("connection lost")
+        print(f"connection lost in {time.monotonic() - start_time - 15}")
+
 
 
 def main():
-    HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
+    # HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
+    HOST = '147.175.160.168'
     PORT = 9053  # int(input("Zadaj cieľový port")
 
     is_file = 1
@@ -225,7 +229,8 @@ def main():
     #      "   0   -   sprava\n"
     #      "   1   -   subor\n")))
     if is_file == 1:
-        file_name = input("zadaj absolutnu cestu k suboru: ")
+        # file_name = input("zadaj absolutnu cestu k suboru: ")
+        file_name = "C:\\Users\\patri\\pks\\zad_2\\pks_test.txt"
         with open(file_name) as file:
             message = file.read()
 
@@ -233,14 +238,14 @@ def main():
         file_name = file_name[len(file_name) - file_name[::-1].index("\\"):]
     else:
         file_name = None
-        message = input("Zadaj spravu ktoru chces poslat:\n")
+        # message = input("Zadaj spravu ktoru chces poslat:\n")
         message = """\
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum nulla ornare, rutrum purus id, imperdiet libero. Curabitur eros lectus, blandit vitae justo malesuada, lacinia vulputate nisl. Maecenas et neque vitae neque imperdiet tempor id vel magna. Fusce magna neque, viverra a urna nec, egestas varius ex. Quisque vitae viverra massa. Proin lobortis facilisis metus vel semper. Duis cursus pulvinar euismod. Ut rhoncus porta nibh, a placerat velit commodo vel. Morbi ac urna dui. Nunc iaculis elementum odio et efficitur. Praesent bibendum eros eget neque bibendum ultrices sed sit amet est. Quisque venenatis turpis vel magna vestibulum convallis ac id erat. Donec fringilla eu ex cursus hendrerit. Nam lacinia a diam at blandit. Vestibulum et orci laoreet, eleifend tortor ut, faucibus ex.
 Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.
 Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
 Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
 Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur."""
-    s = Sender(HOST, PORT, message, is_file, file_name=file_name)
+    s = Sender(HOST, PORT, message, is_file, file_name)
     s.send()
 
     # p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
