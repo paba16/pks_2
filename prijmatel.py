@@ -5,11 +5,13 @@ from CyclicRedundancyCheck import CRC
 from odosielatel import Sender
 from LDProtocol import LDProtocol
 
+
 class SelectiveRepeatARQ:
     def __init__(self):
         self.message = b''
         self.is_file = False
         self.start = 0
+        self.is_finalized = False
 
         # dict nie je sorted podla keys
         # buffer na stare spravy
@@ -17,6 +19,9 @@ class SelectiveRepeatARQ:
 
         # musime posunut az ked dostaneme nulty packet
         self.current_window = {i: None for i in range(LDProtocol.WINDOW_SIZE)}
+
+    def is_buffer_empty(self):
+        return all(i is None for i in self.current_window.values())
 
     def check(self, frame: bytes):  # todo popracovat na nazvoch...
         header = frame[:4]
@@ -49,7 +54,6 @@ class SelectiveRepeatARQ:
             # odstrani od prveho retazove acky
             # todo praca na vysvetleniach
             while next(keys) is not None:
-
                 self.old_window.pop((first + i + LDProtocol.WINDOW_SIZE) % LDProtocol.BUFFER_SIZE)
                 self.old_window[(first + i) % LDProtocol.BUFFER_SIZE] = (
                     self.current_window.pop((first + i) % LDProtocol.BUFFER_SIZE))
@@ -87,15 +91,20 @@ class Reciever:
         self.server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.server.bind((host, port))
 
+        self.debug = True  # "pokazi" prvy ukoncovaci packet
+
         self.arq = SelectiveRepeatARQ()
 
     def recieve(self):
-        while True:
-            message, source = self.server.recvfrom(509)  # todo size
-            if message[0] & LDProtocol.KEEP_ALIVE:  # todo  bity zo suboru
+        while not (self.arq.is_finalized and self.arq.is_buffer_empty()):
+            # todo spytat sa na velkost?
+            #  508 je maximum co urcite nebude fragmentovane
+            #    - toto zahrna nasu 4B hlavicku
+            message, source = self.server.recvfrom(509)
+            if message[0] & LDProtocol.KEEP_ALIVE:
                 # posle spat Keep alive
                 self.server.sendto(bytes([LDProtocol.KEEP_ALIVE | LDProtocol.ACK, 0, 0, 0]), source)
-                print("KL")
+                print("recieved Keep Alive")
             # elif message[0] & LDProtocol.SWAP:
                 # message = "ok".encode("utf-8")
 
@@ -104,23 +113,31 @@ class Reciever:
                 #  od koho ma prist SWAP?
                 # Sender(host=self.host, port=self.port, message=message, sock=self.server.dup())
             elif message[0] & LDProtocol.FIN:
-                # todo neopakuj kod repeatu
-                self.server.sendto(self.arq.check(message), source)
+                # todo ak iba posledny packet zlyha
+                #  pri zlom crc nie je zaradeny do window
+                #  neviem ze som ho stratil
+                if self.debug:
+                    message += b"PKS"
+                    self.debug = False
 
-                # todo kod co zaruci ze mame vsetky packety
-                #  cez kontrolu buffera
+                # preverime ci je packet spravny
+                response = self.arq.check(message)
+                if response[0] & LDProtocol.ACK:
+                    # nastavime koncovu vlajku iba ak sme spravu prijali
+                    self.arq.is_finalized = True
 
-                self.arq.output()
-                break
-                # todo neukoncili sme komunikaciu
-                #  este treba overit ci je buffer prazdny
+                self.server.sendto(response, source)
             else:
                 self.server.sendto(self.arq.check(message), source)
 
+        # ukoncili sme spojenie, tak spracujeme spravu
+        self.arq.output()
+        time.sleep(5)
+
 
 def main():
-    # HOST = '127.0.0.1'
-    HOST = '147.175.160.168'
+    HOST = '127.0.0.1'
+    # HOST = '147.175.160.168'
     PORT = 9053  # int(input("Zadaj port komunikácie: "))
 
     recv = Reciever(HOST, PORT)

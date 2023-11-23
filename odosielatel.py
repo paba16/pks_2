@@ -6,12 +6,13 @@ import selectors
 from LDProtocol import LDProtocol
 from CyclicRedundancyCheck import CRC
 
-resend_lock = threading.Lock()
-to_resend = []
-
 
 class Packet:
-    RTT = 5  # todo menit?
+    resend_lock = threading.Lock()
+    # todo co ak recv nack po timeoute
+    to_resend = []
+
+    RTT = 5  # todo menit? presunut?
 
     def __init__(self, flags, number, message):
         self.flags = flags
@@ -28,11 +29,11 @@ class Packet:
         Vytvori novy casovac a prida datagram ku packetom na znovu odoslanie
         :return:
         """
-        global to_resend
-        self.timer = threading.Timer(Packet.RTT, self.reschedule)
+        if self not in Packet.to_resend:
+            self.timer = threading.Timer(Packet.RTT, self.reschedule)
 
-        with resend_lock:
-            to_resend.append(self)
+            with Packet.resend_lock:
+                Packet.to_resend.append(self)
 
     def stop_timer(self):
         """
@@ -75,14 +76,16 @@ class Sender:
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.comm_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
 
+        # pamatame si odpoved na posledne 4 Keep Alive,
+        # avsak posledne Keep Alive nema vplyv
         self.is_alive = [True] * 3
 
-        self.alive_thread = threading.Thread(target=self.keep_alive)
+        self.alive_thread = threading.Thread(target=self.keep_alive, daemon=True)
         self.send_keep_alive = threading.Event()
 
         # nastavi vlajku na fungovanie a spusti
         self.send_keep_alive.set()
-        self.alive_thread.start()
+        # self.alive_thread.start()
 
     @staticmethod
     def construct_message(filename, message):
@@ -99,7 +102,7 @@ class Sender:
         return i
 
     def send(self):
-        packet_size = 500  # todo packet size
+        packet_size = 504  # todo packet size
         i = 0
 
         # todo casovac pouziva RTT, asi ziskany z Keep Alive
@@ -107,7 +110,16 @@ class Sender:
 
         # todo while loop neposle outstanding resend packets
         #  neriesi exit ak nie sme alive
-        while self.last_sent_index < len(self.message):
+
+        # opakujeme kym mame nieco poslat
+        while self.datagrams or self.last_sent_index < len(self.message):
+            if not any(self.is_alive):
+                # todo
+                #  ak bolo spojenie prerusene ......
+
+                # todo pories ukoncenie
+                print("stratili sme spojenie...")
+                break
             events = self.selector.select()
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
@@ -116,7 +128,12 @@ class Sender:
                     # dostaneme naspat hlavicku s nulovym checksum
                     message = conn.recv(4)
 
-                    if message[0] & LDProtocol.ACK:
+                    print(message[0] & (LDProtocol.ACK | LDProtocol.KEEP_ALIVE))
+                    print((message[0] & LDProtocol.ACK))
+                    if ((message[0] & (LDProtocol.ACK | LDProtocol.KEEP_ALIVE))
+                            == (LDProtocol.KEEP_ALIVE | LDProtocol.ACK)):
+                        self.is_alive[-1] = True
+                    elif message[0] & LDProtocol.ACK:
                         # zistime ktory packet z okna sme prijali
                         k = self.get_number_packet(message[1])
                         packet = self.datagrams[k]
@@ -143,11 +160,6 @@ class Sender:
                         packet.reschedule()
 
                         # todo upravit RTT
-                    elif message[0] & LDProtocol.KEEP_ALIVE:
-                        self.is_alive[-1] = True
-                        # todo kde exit ak nie sme alive?
-                        #  check any(self.is_alive) pred odoslanim
-
                     elif message[0] & LDProtocol.SWAP:
                         # todo pozastavime alive_thread
                         #   zapneme vlastneho prijimatela
@@ -159,14 +171,14 @@ class Sender:
 
                 if mask & selectors.EVENT_WRITE:
                     conn = key.fileobj
-                    if len(to_resend) != 0:
+                    if len(Packet.to_resend) != 0:
                         print("resend")
                         # bud preposlem stary segment
-                        with resend_lock:
-                            item = to_resend.pop(0).out()
+                        with Packet.resend_lock:
+                            item = Packet.to_resend.pop(0).out()
                         conn.send(item)
 
-                    elif len(self.datagrams) < LDProtocol.WINDOW_SIZE:
+                    elif len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message):
                         # alebo poslem novy
                         flags = 0
                         # print("write", [i.ack for i in self.datagrams])
@@ -178,19 +190,21 @@ class Sender:
                             flags |= LDProtocol.FILE
 
                         if end >= len(self.message):
-                            print("Fin")
+                            print("Poslany Fin")
                             flags |= LDProtocol.FIN
 
                         # out of range slicing is handled graceffully
                         # [][999:-999] = [][len([]): -len([])]
                         message = self.message[start:end]
 
+                        # do datagramov pridame iba tu, nie pri opatovnom posielani
                         self.datagrams.append(Packet(flags, i, message))
                         self.last_sent_index = end
 
                         conn.send(self.datagrams[-1].out())
 
                         i = (i + 1) % LDProtocol.BUFFER_SIZE
+        print("exit")
 
     def keep_alive(self):
         """
@@ -217,13 +231,13 @@ class Sender:
         print(f"connection lost in {time.monotonic() - start_time - 15}")
 
 
-
 def main():
-    # HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
-    HOST = '147.175.160.168'
+    # todo znovu povolit vyber
+    HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
+    # HOST = '147.175.160.168'
     PORT = 9053  # int(input("Zadaj cieľový port")
 
-    is_file = 1
+    is_file = 0
     # is_file = int(input(
     #     ("Vyber si typ komunikacie:\n"
     #      "   0   -   sprava\n"
@@ -244,7 +258,8 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum null
 Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.
 Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
 Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
-Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur."""
+Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur.
+koniec"""
     s = Sender(HOST, PORT, message, is_file, file_name)
     s.send()
 
