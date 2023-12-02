@@ -1,4 +1,5 @@
 import socket
+import threading
 import time
 
 from CyclicRedundancyCheck import CRC
@@ -9,7 +10,7 @@ class SelectiveRepeatARQ:
     def __init__(self):
         self.message = b''
         self.is_file = False
-        self.start = 0
+        self.start = time.monotonic()
         self.is_finalized = False
         self.fragment_count = 0
 
@@ -32,22 +33,14 @@ class SelectiveRepeatARQ:
         if (checksum ^ CRC(data)) != 0:
             return bytes([LDProtocol.NACK, seq, 0, 0])
 
-        if seq in self.current_window:
+        elif seq in self.current_window:
             if self.window[seq] is not None:
                 # todo co ak sme uz tento seq prijali?
                 # asi ack ak sa rovna, inak nack
                 pass
             # ak sa datagram nachadza v ocakavanom okne
 
-            # todo file flag pri zaciatku komunikácie
-            #  toto za bude menit pri zmene iniciacie komunikacue
-            # pri prvok datagrame overime ci je sprava subor
-            if self.message == b'' and not self.is_file:
-                self.start = time.monotonic()
-                self.is_file = header[0] & LDProtocol.FILE
-
-            self.current_window[seq] = data
-            self.message += data
+            self.window[seq] = data
 
             current_window_last = self.current_window[-1]
             to_delete = 0
@@ -61,8 +54,11 @@ class SelectiveRepeatARQ:
             # vsetky tieto packety ponechame v neaktivnej casti okna
             # od najstarsieho packetu v starom okne
             for i in range(to_delete):
-                self.current_window.pop(0)
+                # ulozime najnovsiu spravu z okna
+                self.message += self.window[self.current_window.pop(0)]
                 new_current_window_end = (current_window_last + i) % LDProtocol.BUFFER_SIZE
+
+                # vycistime cast buffera pri presune do noveho okna
                 self.window[new_current_window_end] = None
                 self.current_window.append(new_current_window_end)
 
@@ -92,19 +88,49 @@ class SelectiveRepeatARQ:
 
 
 class Reciever:
-    def __init__(self, host=None, port=None, sock=None):
+    def __init__(self, host=None, port=None, sock=None, protocol=LDProtocol(5)):
+        self.protocol = protocol
+
         if sock is None:
             self.server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
         else:
             self.server = sock
+            host, port = self.server.getsockname()
+            # self.server.bind((host,))
+            # print(host, port)
         self.server.bind((host, port))
+
+        self.dest_socket = None
 
         self.debug = True  # "pokazi" prvy ukoncovaci packet
 
         self.arq = SelectiveRepeatARQ()
 
+    def comm_init(self):
+        while True:
+            message, source = self.server.recvfrom(509)
+            if message[0] & LDProtocol.START:
+                print("prijatie ziadosti o zaciatok")
+                if message[0] & LDProtocol.FILE:
+                    # sprava bude subor
+                    self.arq.is_file = True
+
+                # zapamatame si socket s ktorym komunikujeme
+                self.dest_socket = source
+                # odosle naspat START ACK
+                self.server.sendto(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
+
+                # zapneme odpocitavanie Keep Alive
+                # threading.Thread(target=self.alive_countdown, daemon=True).start()
+
+                return self.recieve()
+            else:
+                print("prisiel non-START packet...")
+
     def recieve(self):
-        while not (self.arq.is_finalized and self.arq.is_buffer_empty()):
+        # todo selector
+        while any(self.protocol.is_alive):
             # todo spytat sa na velkost?
             #  508 je maximum co urcite nebude fragmentovane
             #    - toto zahrna nasu 4B hlavicku
@@ -112,11 +138,20 @@ class Reciever:
             # todo ako si ma "zmysliet" ze chce poslat swap?
             message, source = self.server.recvfrom(509)
 
-            if message[0] & LDProtocol.KEEP_ALIVE:
-                # todo is_alive u prijemcu?
+            if source != self.dest_socket:
+                print("prisli data od neznameho socketu...:")
+                print(message)
+
+            elif message[0] & LDProtocol.START:
+                self.server.sendto(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
+
+            elif message[0] & LDProtocol.KEEP_ALIVE:
+                self.protocol.is_alive[-1] = True
+
                 # posle spat Keep alive
                 self.server.sendto(bytes([LDProtocol.KEEP_ALIVE | LDProtocol.ACK, 0, 0, 0]), source)
                 print("recieved Keep Alive")
+
             elif message[0] & LDProtocol.SWAP:
                 self.server.sendto(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
 
@@ -133,24 +168,40 @@ class Reciever:
                 # ip mam, je to source
                 novy = odosielatel.Sender(host=source[0], port=source[1], message=message, sock=self.server.dup())
                 novy.send()
+
             elif message[0] & LDProtocol.FIN:
+                # ak sme dostali FIN, odosielatel uz ukoncil odosielanie
+                print("uspesne ukoncene spojenie")
+                # ukoncili sme spojenie, tak spracujeme spravu
+                self.arq.output()
+                return
+
+            else:
                 if self.debug:
                     # ak je nastaveny debug, zmeni prvu spravu pre kontrolu CRC
                     message += b"PKS"
                     self.debug = False
 
-                # preverime ci je packet spravny
-                response = self.arq.check(message)
-                if response[0] & LDProtocol.ACK:
-                    # nastavime koncovu vlajku iba ak sme spravu prijali
-                    self.arq.is_finalized = True
-
-                self.server.sendto(response, source)
-            else:
                 self.server.sendto(self.arq.check(message), source)
 
-        # ukoncili sme spojenie, tak spracujeme spravu
+        print("neuspesne ukoncena komunikacia - zlyhanie Keep Alive")
         self.arq.output()
+
+    def alive_countdown(self):
+        interval = 5
+        start_time = time.monotonic()
+        while any(self.protocol.is_alive):
+            with self.protocol.alive_lock:
+                self.protocol.is_alive.pop(0)
+                self.protocol.is_alive.append(False)
+
+            time.sleep((interval - (time.monotonic() - start_time) % interval))
+
+            # pocka kym je vlajka na posielanie znovu nastavena
+            self.protocol.keep_alive_flag.wait()
+
+        print(f"connection lost in {time.monotonic() - start_time - 15}")
+
 
 
 def main():
@@ -158,8 +209,8 @@ def main():
     # HOST = ""  # na vsetkych adresach
     PORT = 9053  # int(input("Zadaj port komunikácie: "))
 
-    recv = Reciever(HOST, PORT)
-    recv.recieve()
+    recv = Reciever(host=HOST, port=PORT)
+    recv.comm_init()
 
 
 if __name__ == "__main__":

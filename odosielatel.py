@@ -71,7 +71,6 @@ class Sender:
             self.comm_socket = sock
 
         self.comm_socket.connect((host, port))
-        self.comm_socket.setblocking(False)
 
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.comm_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
@@ -94,18 +93,44 @@ class Sender:
             i += 1
         return i
 
+    def init_comm(self):
+        flags = LDProtocol.START
+        if self.is_file:
+            flags |= LDProtocol.FILE
+
+        while True:
+            try:
+                self.comm_socket.send(bytes([flags, 0, 0, 0]))
+                # todo selector ak nedostaneme odpoved do 5s
+                message, source = self.comm_socket.recvfrom(509)
+            except socket.error as e:
+                print(e)
+                print("ukoncime pokus o spojenie...")
+                return
+            if (message[0] & (LDProtocol.START | LDProtocol.ACK)) == (LDProtocol.START | LDProtocol.ACK):
+                return self.send()
+
+            else:
+                # todo ziadne podmienky?
+                time.sleep(5)
+
+    def end_comm(self):
+        print("Ukoncenie spravy, posleme FIN")
+        self.comm_socket.send(bytes([LDProtocol.FIN, 0, 0, 0]))
+
     def swap(self):
         # precital poznamku u odosielatela
         # pozastavime alive_thread
         # zapneme vlastneho prijimatela
         # po ukonceni prijimatela znovu zapneme alive_thread
-        self.protocol.send_keep_alive.clear()
+        self.protocol.keep_alive_flag.clear()
         # todo prepneme sa na prijimatela
         novy = prijmatel.Reciever(sock=self.comm_socket.dup())
         novy.recieve()
-        self.protocol.send_keep_alive.set()
+        self.protocol.keep_alive_flag.set()
 
     def send(self):
+        self.comm_socket.setblocking(False)
         packet_size = 504  # todo packet size
         i = 0
 
@@ -121,7 +146,6 @@ class Sender:
                 print("stratili sme spojenie...")
                 break
 
-            # todo kedy si zmysli poslat SWAP?
             events = self.selector.select()
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
@@ -141,7 +165,7 @@ class Sender:
                         self.swap()
                     elif message[0] & LDProtocol.SWAP:
                         # todo priprava na swap
-                        conn.send([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0])
+                        conn.send(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
                         self.swap()
 
                     elif message[0] & LDProtocol.ACK:
@@ -171,20 +195,20 @@ class Sender:
 
                 if mask & selectors.EVENT_WRITE:
                     conn = key.fileobj
-                    if random.random() < 0.1:
-                        print("SWAP request sent")
-                        conn.send(bytes([LDProtocol.SWAP, 0, 0, 0]))
-                        continue
-                    elif len(self.protocol.to_resend) != 0:
+                    # if random.random() < 0.1:
+                    #     print("SWAP request sent")
+                    #     conn.send(bytes([LDProtocol.SWAP, 0, 0, 0]))
+                    #     continue
+                    if len(self.protocol.to_resend) != 0:
                         print("resend")
                         # bud preposlem stary segment
                         with self.protocol.resend_lock:
-                            packet = self.protocol.to_resend.pop(0).out()
+                            packet = self.protocol.to_resend.pop(0)
                             while self.protocol.to_resend and packet not in self.datagrams:
-                                packet = self.protocol.to_resend.pop(0).out()
+                                packet = self.protocol.to_resend.pop(0)
 
                         if packet in self.datagrams:
-                            conn.send(packet)
+                            conn.send(packet.out())
                             continue
 
                         # pokracujeme len ak packet na opatovne poslanie uz nebol v aktualnom okne
@@ -201,12 +225,9 @@ class Sender:
                         if start == 0 and self.is_file == 1:
                             flags |= LDProtocol.FILE
 
-                        if end >= len(self.message):
-                            print("Poslany Fin")
-                            flags |= LDProtocol.FIN
-
-                        # out of range slicing is handled graceffully
-                        # [][999:-999] = [][len([]): -len([])]
+                        # out of range slicing is handled gracefully
+                        # a = []
+                        # a[999:-999] == a[len(a): -len(a)]
                         message = self.message[start:end]
 
                         # do datagramov pridame packet, ostane tam kym nedostaneme ack
@@ -216,7 +237,19 @@ class Sender:
                         conn.send(self.datagrams[-1].out())
 
                         i = (i + 1) % LDProtocol.BUFFER_SIZE
-        print("exit")
+
+            if len(self.datagrams) == 0 and self.last_sent_index >= len(self.message):
+                # ak sme odoslali celu spravu a uz nic neocakava znovu odoslabie
+                return self.end_comm()
+
+
+
+
+    def read(self):
+        pass
+
+    def write(self):
+        pass
 
     def keep_alive(self):
         """
@@ -237,7 +270,7 @@ class Sender:
             time.sleep((interval - (time.monotonic() - start_time) % interval))
 
             # pocka kym je vlajka na posielanie znovu nastavena
-            self.protocol.send_keep_alive.wait()
+            self.protocol.keep_alive_flag.wait()
 
         print(f"connection lost in {time.monotonic() - start_time - 15}")
 
@@ -275,7 +308,7 @@ Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, f
 Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur.
 koniec"""
     s = Sender(HOST, PORT, message, is_file, file_name)
-    s.send()
+    s.init_comm()
 
     # p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
     # p1.start()

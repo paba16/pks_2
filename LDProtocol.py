@@ -7,6 +7,7 @@ class LDProtocol:
     KEEP_ALIVE = 1 << 2
     FIN = 1 << 3
     SWAP = 1 << 4
+    START = 1 << 6
     FILE = 1 << 7
 
     WINDOW_SIZE = 8
@@ -18,9 +19,9 @@ class LDProtocol:
         self.resend_lock = threading.Lock()
         self.to_resend = []
 
-        self.send_keep_alive = threading.Event()
+        self.keep_alive_flag = threading.Event()
         # nastavi vlajku na posielanie Keep Alive
-        self.send_keep_alive.set()
+        self.keep_alive_flag.set()
 
         self.alive_lock = threading.Lock()
 
