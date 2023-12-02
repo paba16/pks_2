@@ -16,6 +16,7 @@ class SelectiveRepeatARQ:
         self.fragment_count = 0
 
         # buffer na spravy
+        # dict ma moznost vratenia default hodnoty
         self.window = {i: None for i in range(LDProtocol.BUFFER_SIZE)}
 
         # oznacenie ktore spravy patria do aktualneho okna
@@ -36,9 +37,7 @@ class SelectiveRepeatARQ:
 
         elif seq in self.current_window:
             if self.window[seq] is not None:
-                # todo co ak sme uz tento seq prijali?
-                # asi ack ak sa rovna, inak nack
-                pass
+                self.bad_seq(data, seq)
             # ak sa datagram nachadza v ocakavanom okne
 
             self.window[seq] = data
@@ -66,13 +65,26 @@ class SelectiveRepeatARQ:
             self.fragment_count += 1
             return bytes([LDProtocol.ACK, seq, 0, 0])
         else:
-            # buffer je 2x okno, najdem packet s number, ak sa rovna, dostane ack, inak nack
-            old_data = self.window.get(seq)
+            self.bad_seq(data, seq)
 
-            if data == old_data:
-                return bytes([LDProtocol.ACK, seq, 0, 0])
-            else:
-                return bytes([LDProtocol.NACK, seq, 0, 0])
+    def bad_seq(self, data, seq):
+        """
+        v pripade zleho cisla spravy overime ci je sprava rovna sprave s rovnakym seq v buffery
+
+        vyuzitie:
+         - pride sprava mimo aktualneho okna
+         - pride sprava v aktualnom okne, so seq ktory uz mame prijaty
+
+        :param data: sprava
+        :param seq: poradove cislo
+        :return: odpoved na spravu
+        """
+        if data == self.window.get(seq):
+            # ak ano posleme ACK
+            return bytes([LDProtocol.ACK, seq, 0, 0])
+        else:
+            # inak posleme nack
+            return bytes([LDProtocol.NACK, seq, 0, 0])
 
     def output(self):
         print(f"Subor preneseny za {time.monotonic() - self.start} s")
@@ -108,6 +120,13 @@ class Reciever:
 
         self.arq = SelectiveRepeatARQ()
 
+    def send_data(self, data, dest):
+        try:
+            self.server.sendto(data, dest)
+        except socket.error as e:
+            print(e)
+            print("pokracujeme dalej")
+
     def comm_init(self):
         while True:
             message, source = self.server.recvfrom(509)
@@ -120,7 +139,7 @@ class Reciever:
                 # zapamatame si socket s ktorym komunikujeme
                 self.dest_socket = source
                 # odosle naspat START ACK
-                self.server.sendto(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
+                self.send_data(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
 
                 # zapneme odpocitavanie Keep Alive
                 # threading.Thread(target=self.alive_countdown, daemon=True).start()
@@ -151,18 +170,18 @@ class Reciever:
                         print(message)
 
                     elif message[0] & LDProtocol.START:
-                        self.server.sendto(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
+                        self.send_data(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
 
                     elif message[0] & LDProtocol.KEEP_ALIVE:
                         self.protocol.is_alive[-1] = True
 
                         # posle spat Keep alive
-                        self.server.sendto(bytes([LDProtocol.KEEP_ALIVE | LDProtocol.ACK, 0, 0, 0]), source)
+                        self.send_data(bytes([LDProtocol.KEEP_ALIVE | LDProtocol.ACK, 0, 0, 0]), source)
                         print("recieved Keep Alive")
 
                     elif message[0] & LDProtocol.SWAP:
                         # todo priprav swap?
-                        self.server.sendto(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
+                        self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
                         self.swap()
 
                     elif message[0] & LDProtocol.FIN:
@@ -178,7 +197,7 @@ class Reciever:
                             message += b"PKS"
                             self.debug = False
 
-                        self.server.sendto(self.arq.check(message), source)
+                        self.send_data(self.arq.check(message), source)
 
         print("neuspesne ukoncena komunikacia - zlyhanie Keep Alive")
         self.arq.output()
@@ -234,7 +253,6 @@ class Reciever:
             self.protocol.keep_alive_flag.wait()
 
         print(f"connection lost in {time.monotonic() - start_time - 15}")
-
 
 
 def main():

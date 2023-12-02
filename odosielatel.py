@@ -85,6 +85,13 @@ class Sender:
             return message.encode("utf-8")
         return filename.encode("utf-8") + bytes([0]) + message.encode()
 
+    def send_data(self, data):
+        try:
+            self.send_data(data)
+        except socket.error as e:
+            print(e)
+            print("pokracujeme dalej")
+
     def get_number_packet(self, number):
         i = 0
         while number != self.datagrams[i].number:
@@ -101,7 +108,7 @@ class Sender:
             flags |= LDProtocol.FILE
         while True:
             try:
-                self.comm_socket.send(bytes([flags, 0, 0, 0]))
+                self.send_data(bytes([flags, 0, 0, 0]))
 
                 # selector ak nedostaneme odpoved do 5s
                 events = self.selector.select(5)
@@ -123,7 +130,7 @@ class Sender:
 
     def end_comm(self):
         print("Ukoncenie spravy, posleme FIN")
-        self.comm_socket.send(bytes([LDProtocol.FIN, 0, 0, 0]))
+        self.send_data(bytes([LDProtocol.FIN, 0, 0, 0]))
 
     def send(self):
         self.comm_socket.setblocking(False)
@@ -153,7 +160,7 @@ class Sender:
 
             if len(self.datagrams) == 0 and self.protocol.prepare_swap:
                 # sme pripraveny na swap
-                self.comm_socket.send(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
+                self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
                 self.swap()
 
             if len(self.datagrams) == 0 and self.last_sent_index >= len(self.message):
@@ -216,7 +223,7 @@ class Sender:
         if packet_size == -1:
             # SWAP posielame ak je poziadavka na packet o velkosti -1
             print("SWAP request sent")
-            conn.send(bytes([LDProtocol.SWAP, 0, 0, 0]))
+            conn.send_data(bytes([LDProtocol.SWAP, 0, 0, 0]))
             self.protocol.prepare_swap = True
             return
 
@@ -232,7 +239,7 @@ class Sender:
 
             # ak je tento packet v datagramoch posleme ho
             if packet in self.datagrams:
-                conn.send(packet.out())
+                conn.send_data(packet.out())
                 return
             # inak sa pokusime poslat novy packet
 
@@ -255,7 +262,7 @@ class Sender:
             # do datagramov pridame packet, ostane tam kym nedostaneme ack
             self.datagrams.append(Packet(flags, self.next_seq, message, self.protocol))
 
-            conn.send(self.datagrams[-1].out())
+            conn.send_data(self.datagrams[-1].out())
 
             self.next_seq = (self.next_seq + 1) % LDProtocol.BUFFER_SIZE
 
@@ -282,7 +289,7 @@ class Sender:
         interval = 5
         start_time = time.monotonic()
         while any(self.protocol.is_alive):
-            self.comm_socket.send(bytes([4, 0, 0, 0]))
+            self.send_data(bytes([4, 0, 0, 0]))
 
             with self.protocol.alive_lock:
                 self.protocol.is_alive.pop(0)
