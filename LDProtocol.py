@@ -14,7 +14,8 @@ class LDProtocol:
     BUFFER_SIZE = 2 * WINDOW_SIZE
 
     def __init__(self, rtt):
-        self.rtt = rtt  # todo menit?
+        self.rtt = rtt
+        self.prepare_swap = False
 
         self.resend_lock = threading.Lock()
         self.to_resend = []

@@ -22,7 +22,7 @@ class Packet:
         self.ack = False
 
         self.timer = threading.Timer(self.protocol.rtt, self.reschedule)
-    
+
     def reschedule(self):
         """
         Ak nie je packet pripraveny na opa prida datagram ku packetom na znovu odoslanie
@@ -59,6 +59,7 @@ class Sender:
                  sock=None, protocol=LDProtocol(5)):
         self.message = self.construct_message(file_name, message)
         self.last_sent_index = 0
+        self.next_seq = 0
 
         self.is_file = is_file
 
@@ -132,7 +133,6 @@ class Sender:
     def send(self):
         self.comm_socket.setblocking(False)
         packet_size = 504  # todo packet size
-        i = 0
 
         # todo casovac pouziva RTT, asi ziskany z Keep Alive
         #  rtt viem zistit aj z ack/nack
@@ -149,107 +149,120 @@ class Sender:
             events = self.selector.select()
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
-                    conn = key.fileobj
-
-                    # dostaneme naspat hlavicku s nulovym checksum
-                    message = conn.recv(4)
-
-                    if ((message[0] & (LDProtocol.KEEP_ALIVE | LDProtocol.ACK))
-                            == (LDProtocol.KEEP_ALIVE | LDProtocol.ACK)):
-                        # ak sme dostali ack na Keep Alive
-                        with self.protocol.alive_lock:
-                            self.protocol.is_alive[-1] = True
-                    elif ((message[0] & (LDProtocol.SWAP | LDProtocol.ACK))
-                            == (LDProtocol.SWAP | LDProtocol.ACK)):
-                        # todo nie je toto full pepe?
-                        self.swap()
-                    elif message[0] & LDProtocol.SWAP:
-                        # todo priprava na swap
-                        conn.send(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
-                        self.swap()
-
-                    elif message[0] & LDProtocol.ACK:
-                        # zistime ktory packet z okna sme prijali
-                        k = self.get_number_packet(message[1])
-                        packet = self.datagrams[k]
-                        packet.ack = True
-
-                        packet.stop_timer()
-
-                        # spocitame pocet packetov za sebou s ACK od prveho
-                        j = 0
-                        while j < len(self.datagrams) and self.datagrams[j].ack:
-                            j += 1
-                        
-                        # nasledne tieto packety odstranime z okna
-                        for k in range(j):
-                            self.datagrams.pop(0)
-
-                    elif message[0] & LDProtocol.NACK:
-                        # zistime ktory packet z okna sme prijali
-                        k = self.get_number_packet(message[1])
-                        packet = self.datagrams[k]
-
-                        packet.stop_timer()
-                        packet.reschedule()
+                    # precitame 1 packet
+                    self.read(key)
 
                 if mask & selectors.EVENT_WRITE:
-                    conn = key.fileobj
-                    # if random.random() < 0.1:
-                    #     print("SWAP request sent")
-                    #     conn.send(bytes([LDProtocol.SWAP, 0, 0, 0]))
-                    #     continue
-                    if len(self.protocol.to_resend) != 0:
-                        print("resend")
-                        # bud preposlem stary segment
-                        with self.protocol.resend_lock:
-                            packet = self.protocol.to_resend.pop(0)
-                            while self.protocol.to_resend and packet not in self.datagrams:
-                                packet = self.protocol.to_resend.pop(0)
+                    # odosleme max 1 packet
+                    self.write(key, packet_size)
 
-                        if packet in self.datagrams:
-                            conn.send(packet.out())
-                            continue
-
-                        # pokracujeme len ak packet na opatovne poslanie uz nebol v aktualnom okne
-                        # mohli sme nan dostat ack uz ked bol zaradeni na opakovanie poslania
-
-                    if len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message):
-                        # alebo poslem novy
-                        flags = 0
-                        # print("write", [i.ack for i in self.datagrams])
-
-                        start = self.last_sent_index
-                        end = start + packet_size
-
-                        if start == 0 and self.is_file == 1:
-                            flags |= LDProtocol.FILE
-
-                        # out of range slicing is handled gracefully
-                        # a = []
-                        # a[999:-999] == a[len(a): -len(a)]
-                        message = self.message[start:end]
-
-                        # do datagramov pridame packet, ostane tam kym nedostaneme ack
-                        self.datagrams.append(Packet(flags, i, message, self.protocol))
-                        self.last_sent_index = end
-
-                        conn.send(self.datagrams[-1].out())
-
-                        i = (i + 1) % LDProtocol.BUFFER_SIZE
+            if len(self.datagrams) == 0 and self.protocol.prepare_swap:
+                # sme pripraveny na swap
+                self.comm_socket.send(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
+                self.swap()
 
             if len(self.datagrams) == 0 and self.last_sent_index >= len(self.message):
                 # ak sme odoslali celu spravu a uz nic neocakava znovu odoslabie
                 return self.end_comm()
 
+    def read(self, key):
+        conn = key.fileobj
 
+        # dostaneme naspat hlavicku s nulovym checksum
+        message = conn.recv(4)
 
+        if ((message[0] & (LDProtocol.KEEP_ALIVE | LDProtocol.ACK))
+                == (LDProtocol.KEEP_ALIVE | LDProtocol.ACK)):
+            # ak sme dostali ack na Keep Alive zapamatame si odpoved
+            with self.protocol.alive_lock:
+                self.protocol.is_alive[-1] = True
 
-    def read(self):
-        pass
+        elif ((message[0] & (LDProtocol.SWAP | LDProtocol.ACK))
+              == (LDProtocol.SWAP | LDProtocol.ACK)):
+            # todo nie je toto full pepe?
+            # ak sme dostali odpoved na swap, swapneme
+            self.swap()
 
-    def write(self):
-        pass
+        elif message[0] & LDProtocol.SWAP:
+            # ak sme dostali poziadavku na swap, zacneme sa pripravovat sa na swap
+            self.protocol.prepare_swap = True
+
+        elif message[0] & LDProtocol.ACK:
+            # kladna odpoved na prijaty packet
+
+            # zistime na ktory packet z okna sme prijali odpoved
+            k = self.get_number_packet(message[1])
+            packet = self.datagrams[k]
+            packet.ack = True
+
+            packet.stop_timer()
+
+            # spocitame pocet packetov za sebou s ACK od prveho
+            j = 0
+            while j < len(self.datagrams) and self.datagrams[j].ack:
+                j += 1
+
+            # nasledne tieto packety odstranime z okna
+            for k in range(j):
+                self.datagrams.pop(0)
+
+        elif message[0] & LDProtocol.NACK:
+            # zaporna odpoved na packet
+
+            # zistime na ktory packet z okna sme prijali odpoved
+            k = self.get_number_packet(message[1])
+            packet = self.datagrams[k]
+
+            packet.stop_timer()
+            packet.reschedule()
+
+    def write(self, key, packet_size):
+        conn = key.fileobj
+        if packet_size == -1:
+            # SWAP posielame ak je poziadavka na packet o velkosti -1
+            print("SWAP request sent")
+            conn.send(bytes([LDProtocol.SWAP, 0, 0, 0]))
+            self.protocol.prepare_swap = True
+            return
+
+        elif len(self.protocol.to_resend) != 0:
+            # pokusime sa opatovne poslat stary packet
+
+            print("resend")
+            with self.protocol.resend_lock:
+                packet = self.protocol.to_resend.pop(0)
+                # ak packet je dalsi packet na resent, a tento nie je v datagramoch skusime znovu
+                while self.protocol.to_resend and packet not in self.datagrams:
+                    packet = self.protocol.to_resend.pop(0)
+
+            # ak je tento packet v datagramoch posleme ho
+            if packet in self.datagrams:
+                conn.send(packet.out())
+                return
+            # inak sa pokusime poslat novy packet
+
+        if (not self.protocol.prepare_swap
+                and len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message)):
+            # alebo poslem novy
+            flags = 0
+            # print("write", [i.ack for i in self.datagrams])
+
+            start = self.last_sent_index
+            end = start + packet_size
+            self.last_sent_index = end
+
+            if start == 0 and self.is_file == 1:
+                flags |= LDProtocol.FILE
+
+            # out of range slicing is handled gracefully
+            message = self.message[start:end]
+
+            # do datagramov pridame packet, ostane tam kym nedostaneme ack
+            self.datagrams.append(Packet(flags, self.next_seq, message, self.protocol))
+
+            conn.send(self.datagrams[-1].out())
+
+            self.next_seq = (self.next_seq + 1) % LDProtocol.BUFFER_SIZE
 
     def keep_alive(self):
         """
