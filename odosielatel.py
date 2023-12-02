@@ -2,38 +2,37 @@ import socket
 import threading
 import time
 import selectors
+import random
 
 from LDProtocol import LDProtocol
 from CyclicRedundancyCheck import CRC
+import prijmatel
 
 
 class Packet:
-    resend_lock = threading.Lock()
-    # todo co ak recv nack po timeoute
-    to_resend = []
-
-    RTT = 5  # todo menit? presunut?
-
-    def __init__(self, flags, number, message):
+    def __init__(self, flags, number, message, protocol):
         self.flags = flags
         self.number = number  # poradie % LDProtocol.WINDOW_SIZE
         self.checksum = CRC(message)
         self.message = message
 
+        # todo zapracovat na nazvoch
+        self.protocol = protocol
+
         self.ack = False
 
-        self.timer = threading.Timer(Packet.RTT, self.reschedule)
+        self.timer = threading.Timer(self.protocol.rtt, self.reschedule)
     
     def reschedule(self):
         """
-        Vytvori novy casovac a prida datagram ku packetom na znovu odoslanie
+        Ak nie je packet pripraveny na opa prida datagram ku packetom na znovu odoslanie
         :return:
         """
-        if self not in Packet.to_resend:
-            self.timer = threading.Timer(Packet.RTT, self.reschedule)
+        if self not in self.protocol.to_resend:
+            self.timer = threading.Timer(self.protocol.rtt, self.reschedule)
 
-            with Packet.resend_lock:
-                Packet.to_resend.append(self)
+            with self.protocol.resend_lock:
+                self.protocol.to_resend.append(self)
 
     def stop_timer(self):
         """
@@ -56,7 +55,8 @@ class Packet:
 
 
 class Sender:
-    def __init__(self, host=None, port=None, message=None, is_file=None, file_name=None, sock=None):
+    def __init__(self, host=None, port=None, message=None, is_file=None, file_name=None,
+                 sock=None, protocol=LDProtocol(5)):
         self.message = self.construct_message(file_name, message)
         self.last_sent_index = 0
 
@@ -76,16 +76,9 @@ class Sender:
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.comm_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
 
-        # pamatame si odpoved na posledne 4 Keep Alive,
-        # avsak posledne Keep Alive nema vplyv
-        self.is_alive = [True] * 3
+        self.protocol = protocol
 
         self.alive_thread = threading.Thread(target=self.keep_alive, daemon=True)
-        self.send_keep_alive = threading.Event()
-
-        # nastavi vlajku na fungovanie a spusti
-        self.send_keep_alive.set()
-        # self.alive_thread.start()
 
     @staticmethod
     def construct_message(filename, message):
@@ -101,6 +94,17 @@ class Sender:
             i += 1
         return i
 
+    def swap(self):
+        # precital poznamku u odosielatela
+        # pozastavime alive_thread
+        # zapneme vlastneho prijimatela
+        # po ukonceni prijimatela znovu zapneme alive_thread
+        self.protocol.send_keep_alive.clear()
+        # todo prepneme sa na prijimatela
+        novy = prijmatel.Reciever(sock=self.comm_socket.dup())
+        novy.recieve()
+        self.protocol.send_keep_alive.set()
+
     def send(self):
         packet_size = 504  # todo packet size
         i = 0
@@ -108,18 +112,16 @@ class Sender:
         # todo casovac pouziva RTT, asi ziskany z Keep Alive
         #  rtt viem zistit aj z ack/nack
 
-        # todo while loop neposle outstanding resend packets
-        #  neriesi exit ak nie sme alive
-
         # opakujeme kym mame nieco poslat
         while self.datagrams or self.last_sent_index < len(self.message):
-            if not any(self.is_alive):
-                # todo
-                #  ak bolo spojenie prerusene ......
+            if not any(self.protocol.is_alive):
+                # ak sme na posledne 3 Keep Alive nedostali odpoved
+                # ukoncime spojenie
 
-                # todo pories ukoncenie
                 print("stratili sme spojenie...")
                 break
+
+            # todo kedy si zmysli poslat SWAP?
             events = self.selector.select()
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
@@ -128,11 +130,20 @@ class Sender:
                     # dostaneme naspat hlavicku s nulovym checksum
                     message = conn.recv(4)
 
-                    print(message[0] & (LDProtocol.ACK | LDProtocol.KEEP_ALIVE))
-                    print((message[0] & LDProtocol.ACK))
-                    if ((message[0] & (LDProtocol.ACK | LDProtocol.KEEP_ALIVE))
+                    if ((message[0] & (LDProtocol.KEEP_ALIVE | LDProtocol.ACK))
                             == (LDProtocol.KEEP_ALIVE | LDProtocol.ACK)):
-                        self.is_alive[-1] = True
+                        # ak sme dostali ack na Keep Alive
+                        with self.protocol.alive_lock:
+                            self.protocol.is_alive[-1] = True
+                    elif ((message[0] & (LDProtocol.SWAP | LDProtocol.ACK))
+                            == (LDProtocol.SWAP | LDProtocol.ACK)):
+                        # todo nie je toto full pepe?
+                        self.swap()
+                    elif message[0] & LDProtocol.SWAP:
+                        # todo priprava na swap
+                        conn.send([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0])
+                        self.swap()
+
                     elif message[0] & LDProtocol.ACK:
                         # zistime ktory packet z okna sme prijali
                         k = self.get_number_packet(message[1])
@@ -150,7 +161,6 @@ class Sender:
                         for k in range(j):
                             self.datagrams.pop(0)
 
-                        # todo upravit RTT
                     elif message[0] & LDProtocol.NACK:
                         # zistime ktory packet z okna sme prijali
                         k = self.get_number_packet(message[1])
@@ -159,26 +169,28 @@ class Sender:
                         packet.stop_timer()
                         packet.reschedule()
 
-                        # todo upravit RTT
-                    elif message[0] & LDProtocol.SWAP:
-                        # todo pozastavime alive_thread
-                        #   zapneme vlastneho prijimatela
-                        #   po ukonceni prijimatela znovu zapneme alive_thread
-                        # self.send_keep_alive.set()
-                        # todo prepneme sa na prijimatela
-                        # self.send_keep_alive.clear()
-                        pass
-
                 if mask & selectors.EVENT_WRITE:
                     conn = key.fileobj
-                    if len(Packet.to_resend) != 0:
+                    if random.random() < 0.1:
+                        print("SWAP request sent")
+                        conn.send(bytes([LDProtocol.SWAP, 0, 0, 0]))
+                        continue
+                    elif len(self.protocol.to_resend) != 0:
                         print("resend")
                         # bud preposlem stary segment
-                        with Packet.resend_lock:
-                            item = Packet.to_resend.pop(0).out()
-                        conn.send(item)
+                        with self.protocol.resend_lock:
+                            packet = self.protocol.to_resend.pop(0).out()
+                            while self.protocol.to_resend and packet not in self.datagrams:
+                                packet = self.protocol.to_resend.pop(0).out()
 
-                    elif len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message):
+                        if packet in self.datagrams:
+                            conn.send(packet)
+                            continue
+
+                        # pokracujeme len ak packet na opatovne poslanie uz nebol v aktualnom okne
+                        # mohli sme nan dostat ack uz ked bol zaradeni na opakovanie poslania
+
+                    if len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message):
                         # alebo poslem novy
                         flags = 0
                         # print("write", [i.ack for i in self.datagrams])
@@ -197,8 +209,8 @@ class Sender:
                         # [][999:-999] = [][len([]): -len([])]
                         message = self.message[start:end]
 
-                        # do datagramov pridame iba tu, nie pri opatovnom posielani
-                        self.datagrams.append(Packet(flags, i, message))
+                        # do datagramov pridame packet, ostane tam kym nedostaneme ack
+                        self.datagrams.append(Packet(flags, i, message, self.protocol))
                         self.last_sent_index = end
 
                         conn.send(self.datagrams[-1].out())
@@ -208,31 +220,33 @@ class Sender:
 
     def keep_alive(self):
         """
-        Kazdych interval sekund posle packet s KeepAlive značkou
+        Posle packet s Keep Alive znackou, potom caka 5 sekund a kym sa znovu nenastavi vlajka na posielanie.
 
         Pomocou zvyšku po delení času intervalom zaisťujeme odoslanie v priemere každých interval sekúnd.
-
         :return:
         """
         interval = 5
         start_time = time.monotonic()
-        while any(self.is_alive):
-            # start = time.monotonic()
+        while any(self.protocol.is_alive):
             self.comm_socket.send(bytes([4, 0, 0, 0]))
 
-            self.is_alive.pop(0)
-            self.is_alive.append(False)
+            with self.protocol.alive_lock:
+                self.protocol.is_alive.pop(0)
+                self.protocol.is_alive.append(False)
 
             time.sleep((interval - (time.monotonic() - start_time) % interval))
 
-            # print(time.monotonic() - start)
+            # pocka kym je vlajka na posielanie znovu nastavena
+            self.protocol.send_keep_alive.wait()
 
-        # todo ako po ukonceni odosielania?
         print(f"connection lost in {time.monotonic() - start_time - 15}")
 
 
 def main():
+    # todo lepsie nadviazanie spojenia
+
     # todo znovu povolit vyber
+
     HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
     # HOST = '147.175.160.168'
     PORT = 9053  # int(input("Zadaj cieľový port")

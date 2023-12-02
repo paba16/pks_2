@@ -13,6 +13,17 @@ class LDProtocol:
     BUFFER_SIZE = 2 * WINDOW_SIZE
 
     def __init__(self, rtt):
-        self.rtt = rtt
-        self.lock = threading.Lock()
+        self.rtt = rtt  # todo menit?
+
+        self.resend_lock = threading.Lock()
         self.to_resend = []
+
+        self.send_keep_alive = threading.Event()
+        # nastavi vlajku na posielanie Keep Alive
+        self.send_keep_alive.set()
+
+        self.alive_lock = threading.Lock()
+
+        # urcuje na kolko Keep Alive musi zlyhat na ukoncenie spojenia
+        # pri kontrole moze byt posledny packet este bez odpovede
+        self.is_alive = [True] * 4
