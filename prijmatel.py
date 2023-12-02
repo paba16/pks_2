@@ -1,3 +1,4 @@
+import selectors
 import socket
 import threading
 import time
@@ -129,63 +130,95 @@ class Reciever:
                 print("prisiel non-START packet...")
 
     def recieve(self):
-        # todo selector
+        selektor = selectors.DefaultSelector()
+        selektor.register(self.server, selectors.EVENT_READ)
+        self.server.setblocking(False)
+
         while any(self.protocol.is_alive):
             # todo spytat sa na velkost?
             #  508 je maximum co urcite nebude fragmentovane
             #    - toto zahrna nasu 4B hlavicku
 
             # todo ako si ma "zmysliet" ze chce poslat swap?
-            message, source = self.server.recvfrom(509)
+            events = selektor.select()
 
-            if source != self.dest_socket:
-                print("prisli data od neznameho socketu...:")
-                print(message)
+            for key, mask in events:
+                if mask & selectors.EVENT_READ:
+                    message, source = self.server.recvfrom(509)
 
-            elif message[0] & LDProtocol.START:
-                self.server.sendto(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
+                    if source != self.dest_socket:
+                        print("prisli data od neznameho socketu...:")
+                        print(message)
 
-            elif message[0] & LDProtocol.KEEP_ALIVE:
-                self.protocol.is_alive[-1] = True
+                    elif message[0] & LDProtocol.START:
+                        self.server.sendto(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
 
-                # posle spat Keep alive
-                self.server.sendto(bytes([LDProtocol.KEEP_ALIVE | LDProtocol.ACK, 0, 0, 0]), source)
-                print("recieved Keep Alive")
+                    elif message[0] & LDProtocol.KEEP_ALIVE:
+                        self.protocol.is_alive[-1] = True
 
-            elif message[0] & LDProtocol.SWAP:
-                self.server.sendto(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
+                        # posle spat Keep alive
+                        self.server.sendto(bytes([LDProtocol.KEEP_ALIVE | LDProtocol.ACK, 0, 0, 0]), source)
+                        print("recieved Keep Alive")
 
-                message = "swapped message"
-                # todo ak mame nieco na recieve, vsetko sa pokazi
-                #  2 moznosti
-                #   1. vyprazdnit bufffer
-                #   2. tu riesime swap od sendera. U sendera nastavime aby iba cital
-                #       ak nema co citat, akceptujeme swap a swapneme
-                #       -
-                #       swap od nas by znamenal fungovanie nadalej kym nedostaneme SWAP ACK
-                #       na strane odosielatela by sme iba spracovali vsetky odpovede a poslali SWAP ACP a swapli
+                    elif message[0] & LDProtocol.SWAP:
+                        # todo priprav swap?
+                        self.server.sendto(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
+                        self.swap()
 
-                # ip mam, je to source
-                novy = odosielatel.Sender(host=source[0], port=source[1], message=message, sock=self.server.dup())
-                novy.send()
+                    elif message[0] & LDProtocol.FIN:
+                        # ak sme dostali FIN, odosielatel uz ukoncil odosielanie
+                        print("uspesne ukoncene spojenie")
+                        # ukoncili sme spojenie, tak spracujeme spravu
+                        self.arq.output()
+                        return
 
-            elif message[0] & LDProtocol.FIN:
-                # ak sme dostali FIN, odosielatel uz ukoncil odosielanie
-                print("uspesne ukoncene spojenie")
-                # ukoncili sme spojenie, tak spracujeme spravu
-                self.arq.output()
-                return
+                    else:
+                        if self.debug:
+                            # ak je nastaveny debug, zmeni prvu spravu pre kontrolu CRC
+                            message += b"PKS"
+                            self.debug = False
 
-            else:
-                if self.debug:
-                    # ak je nastaveny debug, zmeni prvu spravu pre kontrolu CRC
-                    message += b"PKS"
-                    self.debug = False
-
-                self.server.sendto(self.arq.check(message), source)
+                        self.server.sendto(self.arq.check(message), source)
 
         print("neuspesne ukoncena komunikacia - zlyhanie Keep Alive")
         self.arq.output()
+
+    def swap(self):
+        is_file = 0
+        # is_file = int(input(
+        #     ("Vyber si typ komunikacie:\n"
+        #      "   0   -   sprava\n"
+        #      "   1   -   subor\n")))
+        if is_file == 1:
+            # file_name = input("zadaj absolutnu cestu k suboru: ")
+            file_name = "C:\\Users\\patri\\pks\\zad_2\\pks_test.txt"
+            with open(file_name) as file:
+                message = file.read()
+
+            # z file_name odrezeme obsah po poslednu uvodzovku
+            file_name = file_name[len(file_name) - file_name[::-1].index("\\"):]
+        else:
+            file_name = None
+            # message = input("Zadaj spravu ktoru chces poslat:\n")
+            message = """\
+        Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum nulla ornare, rutrum purus id, imperdiet libero. Curabitur eros lectus, blandit vitae justo malesuada, lacinia vulputate nisl. Maecenas et neque vitae neque imperdiet tempor id vel magna. Fusce magna neque, viverra a urna nec, egestas varius ex. Quisque vitae viverra massa. Proin lobortis facilisis metus vel semper. Duis cursus pulvinar euismod. Ut rhoncus porta nibh, a placerat velit commodo vel. Morbi ac urna dui. Nunc iaculis elementum odio et efficitur. Praesent bibendum eros eget neque bibendum ultrices sed sit amet est. Quisque venenatis turpis vel magna vestibulum convallis ac id erat. Donec fringilla eu ex cursus hendrerit. Nam lacinia a diam at blandit. Vestibulum et orci laoreet, eleifend tortor ut, faucibus ex.
+        Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.
+        Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
+        Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
+        Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur.
+        koniec"""
+
+        # todo ak mame nieco na recieve, vsetko sa pokazi
+        #  2 moznosti
+        #   1. vyprazdnit bufffer
+        #   2. tu riesime swap od sendera. U sendera nastavime aby iba cital
+        #       ak nema co citat, akceptujeme swap a swapneme
+        #       -
+        #       swap od nas by znamenal fungovanie nadalej kym nedostaneme SWAP ACK
+        #       na strane odosielatela by sme iba spracovali vsetky odpovede a poslali SWAP ACP a swapli
+
+        novy = odosielatel.Sender(message=message, file_name=file_name, sock=self.server.dup())
+        novy.send()
 
     def alive_countdown(self):
         interval = 5

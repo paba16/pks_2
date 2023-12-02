@@ -16,7 +16,6 @@ class Packet:
         self.checksum = CRC(message)
         self.message = message
 
-        # todo zapracovat na nazvoch
         self.protocol = protocol
 
         self.ack = False
@@ -55,13 +54,13 @@ class Packet:
 
 
 class Sender:
-    def __init__(self, host=None, port=None, message=None, is_file=None, file_name=None,
+    def __init__(self, host=None, port=None, message=None, file_name=None,
                  sock=None, protocol=LDProtocol(5)):
         self.message = self.construct_message(file_name, message)
         self.last_sent_index = 0
         self.next_seq = 0
 
-        self.is_file = is_file
+        self.is_file = False if file_name is None else True
 
         # pri inicializacii mame packet oznacujuci zaciatok spravy na 0. byte
         self.datagrams = []
@@ -95,40 +94,36 @@ class Sender:
         return i
 
     def init_comm(self):
+        start_time = time.monotonic()
         flags = LDProtocol.START
+
         if self.is_file:
             flags |= LDProtocol.FILE
-
         while True:
             try:
                 self.comm_socket.send(bytes([flags, 0, 0, 0]))
-                # todo selector ak nedostaneme odpoved do 5s
-                message, source = self.comm_socket.recvfrom(509)
+
+                # selector ak nedostaneme odpoved do 5s
+                events = self.selector.select(5)
+                message = bytes([0, 0, 0, 0])  # default odpoved
+                for key, mask in events:
+                    if mask & selectors.EVENT_READ:
+                        message, source = self.comm_socket.recvfrom(509)
             except socket.error as e:
                 print(e)
                 print("ukoncime pokus o spojenie...")
                 return
             if (message[0] & (LDProtocol.START | LDProtocol.ACK)) == (LDProtocol.START | LDProtocol.ACK):
                 return self.send()
-
+            elif (message[0] & (LDProtocol.START | LDProtocol.NACK)) == (LDProtocol.START | LDProtocol.NACK):
+                print("server neprijal nase spojenie")
+                return
             else:
-                # todo ziadne podmienky?
-                time.sleep(5)
+                time.sleep(true_interval(5, start_time))
 
     def end_comm(self):
         print("Ukoncenie spravy, posleme FIN")
         self.comm_socket.send(bytes([LDProtocol.FIN, 0, 0, 0]))
-
-    def swap(self):
-        # precital poznamku u odosielatela
-        # pozastavime alive_thread
-        # zapneme vlastneho prijimatela
-        # po ukonceni prijimatela znovu zapneme alive_thread
-        self.protocol.keep_alive_flag.clear()
-        # todo prepneme sa na prijimatela
-        novy = prijmatel.Reciever(sock=self.comm_socket.dup())
-        novy.recieve()
-        self.protocol.keep_alive_flag.set()
 
     def send(self):
         self.comm_socket.setblocking(False)
@@ -264,6 +259,19 @@ class Sender:
 
             self.next_seq = (self.next_seq + 1) % LDProtocol.BUFFER_SIZE
 
+    def swap(self):
+        self.protocol.prepare_swap = False
+        self.protocol.confirmed_swap = False
+        # precital poznamku u odosielatela
+        # pozastavime alive_thread
+        # zapneme vlastneho prijimatela
+        # po ukonceni prijimatela znovu zapneme alive_thread
+        self.protocol.keep_alive_flag.clear()
+        # todo prepneme sa na prijimatela
+        novy = prijmatel.Reciever(sock=self.comm_socket.dup())
+        novy.recieve()
+        self.protocol.keep_alive_flag.set()
+
     def keep_alive(self):
         """
         Posle packet s Keep Alive znackou, potom caka 5 sekund a kym sa znovu nenastavi vlajka na posielanie.
@@ -280,7 +288,7 @@ class Sender:
                 self.protocol.is_alive.pop(0)
                 self.protocol.is_alive.append(False)
 
-            time.sleep((interval - (time.monotonic() - start_time) % interval))
+            time.sleep(true_interval(interval, start_time))
 
             # pocka kym je vlajka na posielanie znovu nastavena
             self.protocol.keep_alive_flag.wait()
@@ -288,9 +296,11 @@ class Sender:
         print(f"connection lost in {time.monotonic() - start_time - 15}")
 
 
-def main():
-    # todo lepsie nadviazanie spojenia
+def true_interval(interval, start):
+    return interval - (time.monotonic() - start) % interval
 
+
+def main():
     # todo znovu povolit vyber
 
     HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
@@ -320,7 +330,7 @@ Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc 
 Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
 Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur.
 koniec"""
-    s = Sender(HOST, PORT, message, is_file, file_name)
+    s = Sender(host=HOST, port=PORT, message=message, file_name=file_name)
     s.init_comm()
 
     # p1 = threading.Thread(target=keepAlive, daemon=True, args=(src_socket, dest_socket))
