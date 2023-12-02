@@ -71,6 +71,7 @@ class Sender:
             self.comm_socket = sock
 
         self.comm_socket.connect((host, port))
+        self.comm_socket.setblocking(False)
 
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.comm_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
@@ -87,7 +88,7 @@ class Sender:
 
     def send_data(self, data):
         try:
-            self.send_data(data)
+            self.comm_socket.send(data)
         except socket.error as e:
             print(e)
             print("pokracujeme dalej")
@@ -106,12 +107,17 @@ class Sender:
 
         if self.is_file:
             flags |= LDProtocol.FILE
+
+        # selektor na recv s timeoutom
+        selektor = selectors.DefaultSelector()
+        selektor.register(self.comm_socket, selectors.EVENT_READ)
+
         while True:
             try:
                 self.send_data(bytes([flags, 0, 0, 0]))
 
                 # selector ak nedostaneme odpoved do 5s
-                events = self.selector.select(5)
+                events = selektor.select(5)
                 message = bytes([0, 0, 0, 0])  # default odpoved
                 for key, mask in events:
                     if mask & selectors.EVENT_READ:
@@ -223,7 +229,7 @@ class Sender:
         if packet_size == -1:
             # SWAP posielame ak je poziadavka na packet o velkosti -1
             print("SWAP request sent")
-            conn.send_data(bytes([LDProtocol.SWAP, 0, 0, 0]))
+            self.send_data(bytes([LDProtocol.SWAP, 0, 0, 0]))
             self.protocol.prepare_swap = True
             return
 
@@ -239,7 +245,7 @@ class Sender:
 
             # ak je tento packet v datagramoch posleme ho
             if packet in self.datagrams:
-                conn.send_data(packet.out())
+                self.send_data(packet.out())
                 return
             # inak sa pokusime poslat novy packet
 
@@ -262,7 +268,7 @@ class Sender:
             # do datagramov pridame packet, ostane tam kym nedostaneme ack
             self.datagrams.append(Packet(flags, self.next_seq, message, self.protocol))
 
-            conn.send_data(self.datagrams[-1].out())
+            self.send_data(self.datagrams[-1].out())
 
             self.next_seq = (self.next_seq + 1) % LDProtocol.BUFFER_SIZE
 
