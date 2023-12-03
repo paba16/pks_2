@@ -7,6 +7,7 @@ from CyclicRedundancyCheck import CRC
 from LDProtocol import LDProtocol
 import odosielatel
 
+
 class SelectiveRepeatARQ:
     def __init__(self):
         self.message = b''
@@ -37,7 +38,7 @@ class SelectiveRepeatARQ:
 
         elif seq in self.current_window:
             if self.window[seq] is not None:
-                self.bad_seq(data, seq)
+                return self.bad_seq(data, seq)
             # ak sa datagram nachadza v ocakavanom okne
 
             self.window[seq] = data
@@ -56,7 +57,7 @@ class SelectiveRepeatARQ:
             for i in range(to_delete):
                 # ulozime najnovsiu spravu z okna
                 self.message += self.window[self.current_window.pop(0)]
-                new_current_window_end = (current_window_last + i) % LDProtocol.BUFFER_SIZE
+                new_current_window_end = (current_window_last + i+1) % LDProtocol.BUFFER_SIZE
 
                 # vycistime cast buffera pri presune do noveho okna
                 self.window[new_current_window_end] = None
@@ -65,7 +66,7 @@ class SelectiveRepeatARQ:
             self.fragment_count += 1
             return bytes([LDProtocol.ACK, seq, 0, 0])
         else:
-            self.bad_seq(data, seq)
+            return self.bad_seq(data, seq)
 
     def bad_seq(self, data, seq):
         """
@@ -118,6 +119,7 @@ class Reciever:
 
         self.debug = True  # "pokazi" prvy ukoncovaci packet
 
+        self.alive_thread = threading.Thread(target=self.alive_countdown, daemon=True)
         self.arq = SelectiveRepeatARQ()
 
     def send_data(self, data, dest):
@@ -142,7 +144,7 @@ class Reciever:
                 self.send_data(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
 
                 # zapneme odpocitavanie Keep Alive
-                # threading.Thread(target=self.alive_countdown, daemon=True).start()
+                self.alive_thread.start()
 
                 return self.recieve()
             else:
@@ -187,7 +189,9 @@ class Reciever:
                     elif message[0] & LDProtocol.FIN:
                         # ak sme dostali FIN, odosielatel uz ukoncil odosielanie
                         print("uspesne ukoncene spojenie")
-                        # ukoncili sme spojenie, tak spracujeme spravu
+                        # ukoncili sme spojenie, tak vypneme Keep Alive
+                        self.protocol.keep_alive_flag.clear()
+                        # a vypiseme subor
                         self.arq.output()
                         return
 
@@ -196,8 +200,14 @@ class Reciever:
                             # ak je nastaveny debug, zmeni prvu spravu pre kontrolu CRC
                             message += b"PKS"
                             self.debug = False
+                        response = self.arq.check(message)
+                        if response[0] & LDProtocol.ACK:
+                            # print(f"good: {message[1]}")
+                            pass
+                        else:
+                            print(f"bad:  {message[1]}")
 
-                        self.send_data(self.arq.check(message), source)
+                        self.send_data(response, source)
 
         print("neuspesne ukoncena komunikacia - zlyhanie Keep Alive")
         self.arq.output()
@@ -242,22 +252,23 @@ class Reciever:
     def alive_countdown(self):
         interval = 5
         start_time = time.monotonic()
-        while any(self.protocol.is_alive):
+        while any(self.protocol.is_alive) and self.protocol.keep_alive_flag.is_set():
             with self.protocol.alive_lock:
                 self.protocol.is_alive.pop(0)
                 self.protocol.is_alive.append(False)
-
-            time.sleep((interval - (time.monotonic() - start_time) % interval))
+            print(self.protocol.is_alive)
 
             # pocka kym je vlajka na posielanie znovu nastavena
-            self.protocol.keep_alive_flag.wait()
+            if self.protocol.keep_alive_flag.wait():
+                time.sleep((interval - (time.monotonic() - start_time) % interval))
 
-        print(f"connection lost in {time.monotonic() - start_time - 15}")
+        if not any(self.protocol.is_alive):
+            print(f"connection lost in {time.monotonic() - start_time - 15}")
 
 
 def main():
-    HOST = '127.0.0.1'
-    # HOST = ""  # na vsetkych adresach
+    # HOST = '127.0.0.1'
+    HOST = ""  # na vsetkych adresach
     PORT = 9053  # int(input("Zadaj port komunikácie: "))
 
     recv = Reciever(host=HOST, port=PORT)

@@ -7,7 +7,7 @@ import random
 from LDProtocol import LDProtocol
 from CyclicRedundancyCheck import CRC
 import prijmatel
-
+# todo po odpojeni neposiela z resendu v poradi
 
 class Packet:
     def __init__(self, flags, number, message, protocol):
@@ -63,7 +63,7 @@ class Sender:
         self.is_file = False if file_name is None else True
 
         # pri inicializacii mame packet oznacujuci zaciatok spravy na 0. byte
-        self.datagrams = []
+        self.datagrams = {}
 
         if sock is None:
             self.comm_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -93,14 +93,6 @@ class Sender:
             print(e)
             print("pokracujeme dalej")
 
-    def get_number_packet(self, number):
-        i = 0
-        while number != self.datagrams[i].number:
-            if i >= LDProtocol.WINDOW_SIZE:
-                raise LookupError("hladany packet sa nenasiel")
-            i += 1
-        return i
-
     def init_comm(self):
         start_time = time.monotonic()
         flags = LDProtocol.START
@@ -127,6 +119,7 @@ class Sender:
                 print("ukoncime pokus o spojenie...")
                 return
             if (message[0] & (LDProtocol.START | LDProtocol.ACK)) == (LDProtocol.START | LDProtocol.ACK):
+                self.alive_thread.start()
                 return self.send()
             elif (message[0] & (LDProtocol.START | LDProtocol.NACK)) == (LDProtocol.START | LDProtocol.NACK):
                 print("server neprijal nase spojenie")
@@ -162,14 +155,14 @@ class Sender:
 
                 if mask & selectors.EVENT_WRITE:
                     # odosleme max 1 packet
-                    self.write(key, packet_size)
+                    self.write(packet_size)
 
-            if len(self.datagrams) == 0 and self.protocol.prepare_swap:
+            if self.datagrams and self.protocol.prepare_swap:
                 # sme pripraveny na swap
                 self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
                 self.swap()
 
-            if len(self.datagrams) == 0 and self.last_sent_index >= len(self.message):
+            if self.datagrams and self.last_sent_index >= len(self.message):
                 # ak sme odoslali celu spravu a uz nic neocakava znovu odoslabie
                 return self.end_comm()
 
@@ -199,33 +192,36 @@ class Sender:
             # kladna odpoved na prijaty packet
 
             # zistime na ktory packet z okna sme prijali odpoved
-            k = self.get_number_packet(message[1])
-            packet = self.datagrams[k]
+            k = message[1]  # todo k neexistuje
+            packet = self.datagrams.get(k)
+            if packet is None:
+                pass
             packet.ack = True
 
             packet.stop_timer()
 
             # spocitame pocet packetov za sebou s ACK od prveho
             j = 0
-            while j < len(self.datagrams) and self.datagrams[j].ack:
+            keys = iter(self.datagrams.keys())
+            while j < len(self.datagrams) and self.datagrams[next(keys)].ack:
                 j += 1
 
             # nasledne tieto packety odstranime z okna
-            for k in range(j):
-                self.datagrams.pop(0)
+            start = next(iter(self.datagrams))
+            for i in range(j):
+                self.datagrams.pop((start+i) % LDProtocol.BUFFER_SIZE)
 
         elif message[0] & LDProtocol.NACK:
             # zaporna odpoved na packet
 
             # zistime na ktory packet z okna sme prijali odpoved
-            k = self.get_number_packet(message[1])
-            packet = self.datagrams[k]
+            k = message[1]  # todo k neexistuje
+            packet = self.datagrams.get(k)
 
             packet.stop_timer()
             packet.reschedule()
 
-    def write(self, key, packet_size):
-        conn = key.fileobj
+    def write(self, packet_size):
         if packet_size == -1:
             # SWAP posielame ak je poziadavka na packet o velkosti -1
             print("SWAP request sent")
@@ -236,15 +232,25 @@ class Sender:
         elif len(self.protocol.to_resend) != 0:
             # pokusime sa opatovne poslat stary packet
 
-            print("resend")
+            print(f"resend: ")
+            for i in self.protocol.to_resend:
+                print(f"{i.number}, ", end="")
+            print("datagrams: ")
+            for i in self.datagrams:
+                print(f"{i}: {self.datagrams[i].ack}, ", end="")
+            print()
             with self.protocol.resend_lock:
                 packet = self.protocol.to_resend.pop(0)
+
                 # ak packet je dalsi packet na resent, a tento nie je v datagramoch skusime znovu
-                while self.protocol.to_resend and packet not in self.datagrams:
+                while self.protocol.to_resend and packet.number not in self.datagrams:
+                    packet.stop_timer()
                     packet = self.protocol.to_resend.pop(0)
 
             # ak je tento packet v datagramoch posleme ho
-            if packet in self.datagrams:
+            if packet.number in self.datagrams:
+                # todo test tu print
+                print(packet.number, packet)
                 self.send_data(packet.out())
                 return
             # inak sa pokusime poslat novy packet
@@ -253,7 +259,6 @@ class Sender:
                 and len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message)):
             # alebo poslem novy
             flags = 0
-            # print("write", [i.ack for i in self.datagrams])
 
             start = self.last_sent_index
             end = start + packet_size
@@ -266,9 +271,9 @@ class Sender:
             message = self.message[start:end]
 
             # do datagramov pridame packet, ostane tam kym nedostaneme ack
-            self.datagrams.append(Packet(flags, self.next_seq, message, self.protocol))
+            self.datagrams[self.next_seq] = Packet(flags, self.next_seq, message, self.protocol)
 
-            self.send_data(self.datagrams[-1].out())
+            self.send_data(self.datagrams[self.next_seq].out())
 
             self.next_seq = (self.next_seq + 1) % LDProtocol.BUFFER_SIZE
 
@@ -295,18 +300,21 @@ class Sender:
         interval = 5
         start_time = time.monotonic()
         while any(self.protocol.is_alive):
-            self.send_data(bytes([4, 0, 0, 0]))
+            self.send_data(bytes([LDProtocol.KEEP_ALIVE, 0, 0, 0]))
 
             with self.protocol.alive_lock:
                 self.protocol.is_alive.pop(0)
                 self.protocol.is_alive.append(False)
+            print(self.protocol.is_alive)
 
-            time.sleep(true_interval(interval, start_time))
 
             # pocka kym je vlajka na posielanie znovu nastavena
-            self.protocol.keep_alive_flag.wait()
+            if self.protocol.keep_alive_flag.wait():
+                time.sleep((interval - (time.monotonic() - start_time) % interval))
 
-        print(f"connection lost in {time.monotonic() - start_time - 15}")
+        
+        if not any(self.protocol.is_alive):
+            print(f"connection lost in {time.monotonic() - start_time - interval * len(self.protocol.is_alive)}")
 
 
 def true_interval(interval, start):
@@ -315,24 +323,26 @@ def true_interval(interval, start):
 
 def main():
     # todo znovu povolit vyber
+    # todo resending problem
+    HOST = input("Zadaj cieľovú adresu: ")
+    # 169.254.137.15
+    # HOST = '127.0.0.1'
+    PORT = 9053
+    # PORT = int(input("Zadaj cieľový port")
 
-    HOST = '127.0.0.1'  # input("Zadaj cieľovú adresu")
-    # HOST = '147.175.160.168'
-    PORT = 9053  # int(input("Zadaj cieľový port")
-
-    is_file = 0
+    is_file = 1
     # is_file = int(input(
     #     ("Vyber si typ komunikacie:\n"
     #      "   0   -   sprava\n"
     #      "   1   -   subor\n")))
     if is_file == 1:
         # file_name = input("zadaj absolutnu cestu k suboru: ")
-        file_name = "C:\\Users\\patri\\pks\\zad_2\\pks_test.txt"
+        file_name = "pks_test.txt"
         with open(file_name) as file:
             message = file.read()
 
         # z file_name odrezeme obsah po poslednu uvodzovku
-        file_name = file_name[len(file_name) - file_name[::-1].index("\\"):]
+        # file_name = file_name[len(file_name) - file_name[::-1].index("\\"):]
     else:
         file_name = None
         # message = input("Zadaj spravu ktoru chces poslat:\n")
