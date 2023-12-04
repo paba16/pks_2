@@ -33,7 +33,7 @@ class SelectiveRepeatARQ:
 
         data = frame[4:]
 
-        if (checksum ^ CRC(data)) != 0:
+        if (checksum ^ CRC(header[:2] + data)) != 0:
             return bytes([LDProtocol.NACK, seq, 0, 0])
 
         elif seq in self.current_window:
@@ -107,13 +107,9 @@ class Reciever:
 
         if sock is None:
             self.server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
+            self.server.bind((host, port))
         else:
             self.server = sock
-            host, port = self.server.getsockname()
-            # self.server.bind((host,))
-            # print(host, port)
-        self.server.bind((host, port))
 
         self.dest_socket = None
 
@@ -131,7 +127,7 @@ class Reciever:
 
     def comm_init(self):
         while True:
-            message, source = self.server.recvfrom(509)
+            message, source = self.server.recvfrom(1473)
             if message[0] & LDProtocol.START:
                 print("prijatie ziadosti o zaciatok")
                 if message[0] & LDProtocol.FILE:
@@ -161,7 +157,7 @@ class Reciever:
 
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
-                    message, source = self.server.recvfrom(509)
+                    message, source = self.server.recvfrom(1473)
 
                     if source != self.dest_socket:
                         print("prisli data od neznameho socketu...:")

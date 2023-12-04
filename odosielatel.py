@@ -13,7 +13,7 @@ class Packet:
     def __init__(self, flags, number, message, protocol):
         self.flags = flags
         self.number = number  # poradie % LDProtocol.WINDOW_SIZE
-        self.checksum = CRC(message)
+        self.checksum = CRC(bytes([flags, number]) + message)
         self.message = message
 
         self.protocol = protocol
@@ -67,11 +67,10 @@ class Sender:
 
         if sock is None:
             self.comm_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.comm_socket.connect((host, port))
+            self.comm_socket.setblocking(False)
         else:
             self.comm_socket = sock
-
-        self.comm_socket.connect((host, port))
-        self.comm_socket.setblocking(False)
 
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.comm_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
@@ -133,15 +132,14 @@ class Sender:
 
     def send(self):
         self.comm_socket.setblocking(False)
-        packet_size = 504  # todo packet size
-
-        # todo casovac pouziva RTT, asi ziskany z Keep Alive
-        #  rtt viem zistit aj z ack/nack
+        packet_size = 1468  # todo packet size
+        # 1500 - 20 (ip header) - 8 (UDP header) - 4 (nas header)
+        #  = 1468
 
         # opakujeme kym mame nieco poslat
         while self.datagrams or self.last_sent_index < len(self.message):
             if not any(self.protocol.is_alive):
-                # ak sme na posledne 3 Keep Alive nedostali odpoved
+                # ak sme na poslednych x Keep Alive nedostali odpoved
                 # ukoncime spojenie
 
                 print("stratili sme spojenie...")
@@ -161,12 +159,12 @@ class Sender:
                     # odosleme max 1 packet
                     self.write(packet_size)
 
-            if self.datagrams and self.protocol.prepare_swap:
-                # sme pripraveny na swap
-                self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
-                self.swap()
+            # if self.datagrams and self.protocol.prepare_swap:
+            #     # sme pripraveny na swap
+            #     self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
+            #     self.swap()
 
-            if self.datagrams and self.last_sent_index >= len(self.message):
+            if not self.datagrams and self.last_sent_index >= len(self.message):
                 # ak sme odoslali celu spravu a uz nic neocakava znovu odoslabie
                 return self.end_comm()
 
@@ -268,9 +266,6 @@ class Sender:
             start = self.last_sent_index
             end = start + packet_size
             self.last_sent_index = end
-
-            if start == 0 and self.is_file == 1:
-                flags |= LDProtocol.FILE
 
             # out of range slicing is handled gracefully
             message = self.message[start:end]
