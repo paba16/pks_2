@@ -7,7 +7,7 @@ import random
 from LDProtocol import LDProtocol
 from CyclicRedundancyCheck import CRC
 import prijmatel
-# todo po odpojeni neposiela z resendu v poradi
+
 
 class Packet:
     def __init__(self, flags, number, message, protocol):
@@ -152,8 +152,12 @@ class Sender:
                 if mask & selectors.EVENT_READ:
                     # precitame 1 packet
                     self.read(key)
+                elif self.protocol.prepare_swap:
+                    # if not swap from self:
+                    #  self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
+                    self.swap()
 
-                if mask & selectors.EVENT_WRITE:
+                if mask & selectors.EVENT_WRITE and not self.protocol.prepare_swap:
                     # odosleme max 1 packet
                     self.write(packet_size)
 
@@ -192,10 +196,10 @@ class Sender:
             # kladna odpoved na prijaty packet
 
             # zistime na ktory packet z okna sme prijali odpoved
-            k = message[1]  # todo k neexistuje
+            k = message[1]
             packet = self.datagrams.get(k)
             if packet is None:
-                pass
+                return
             packet.ack = True
 
             packet.stop_timer()
@@ -215,8 +219,11 @@ class Sender:
             # zaporna odpoved na packet
 
             # zistime na ktory packet z okna sme prijali odpoved
-            k = message[1]  # todo k neexistuje
+            k = message[1]
             packet = self.datagrams.get(k)
+
+            if packet is None:
+                return
 
             packet.stop_timer()
             packet.reschedule()
@@ -232,13 +239,13 @@ class Sender:
         elif len(self.protocol.to_resend) != 0:
             # pokusime sa opatovne poslat stary packet
 
-            print(f"resend: ")
-            for i in self.protocol.to_resend:
-                print(f"{i.number}, ", end="")
-            print("datagrams: ")
-            for i in self.datagrams:
-                print(f"{i}: {self.datagrams[i].ack}, ", end="")
-            print()
+            # print(f"resend: ")
+            # for i in self.protocol.to_resend:
+            #     print(f"{i.number}, ", end="")
+            # print("datagrams: ")
+            # for i in self.datagrams:
+            #     print(f"{i}: {self.datagrams[i].ack}, ", end="")
+            # print()
             with self.protocol.resend_lock:
                 packet = self.protocol.to_resend.pop(0)
 
@@ -249,8 +256,6 @@ class Sender:
 
             # ak je tento packet v datagramoch posleme ho
             if packet.number in self.datagrams:
-                # todo test tu print
-                print(packet.number, packet)
                 self.send_data(packet.out())
                 return
             # inak sa pokusime poslat novy packet
@@ -307,12 +312,10 @@ class Sender:
                 self.protocol.is_alive.append(False)
             print(self.protocol.is_alive)
 
-
             # pocka kym je vlajka na posielanie znovu nastavena
             if self.protocol.keep_alive_flag.wait():
                 time.sleep((interval - (time.monotonic() - start_time) % interval))
 
-        
         if not any(self.protocol.is_alive):
             print(f"connection lost in {time.monotonic() - start_time - interval * len(self.protocol.is_alive)}")
 
@@ -323,12 +326,13 @@ def true_interval(interval, start):
 
 def main():
     # todo znovu povolit vyber
-    # todo resending problem
     HOST = input("Zadaj cieľovú adresu: ")
     # 169.254.137.15
     # HOST = '127.0.0.1'
     PORT = 9053
     # PORT = int(input("Zadaj cieľový port")
+    # while not (1024 < PORT < 65536):
+    #     PORT = int(input("Zadaj cieľový port")
 
     is_file = 1
     # is_file = int(input(

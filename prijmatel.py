@@ -26,7 +26,7 @@ class SelectiveRepeatARQ:
     def is_buffer_empty(self):
         return all(self.window[i] is None for i in self.current_window)
 
-    def check(self, frame: bytes):  # todo popracovat na nazvoch...
+    def check(self, frame: bytes):
         header = frame[:4]
         seq = header[1]
         checksum = int.from_bytes(header[2:], byteorder="big")
@@ -156,10 +156,6 @@ class Reciever:
         self.server.setblocking(False)
 
         while any(self.protocol.is_alive):
-            # todo spytat sa na velkost?
-            #  508 je maximum co urcite nebude fragmentovane
-            #    - toto zahrna nasu 4B hlavicku
-
             # todo ako si ma "zmysliet" ze chce poslat swap?
             events = selektor.select()
 
@@ -183,8 +179,7 @@ class Reciever:
 
                     elif message[0] & LDProtocol.SWAP:
                         # todo priprav swap?
-                        self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
-                        self.swap()
+                        self.protocol.prepare_swap = True
 
                     elif message[0] & LDProtocol.FIN:
                         # ak sme dostali FIN, odosielatel uz ukoncil odosielanie
@@ -195,7 +190,8 @@ class Reciever:
                         self.arq.output()
                         return
 
-                    else:
+                    elif message[0] == 0:
+                        # ak nie su nastavene ziadne znacky, povazujeme packet za datovy
                         if self.debug:
                             # ak je nastaveny debug, zmeni prvu spravu pre kontrolu CRC
                             message += b"PKS"
@@ -208,16 +204,23 @@ class Reciever:
                             print(f"bad:  {message[1]}")
 
                         self.send_data(response, source)
+                elif self.protocol.prepare_swap:
+                    # todo swap
+                    self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
+
+                    self.swap()
+                    pass
 
         print("neuspesne ukoncena komunikacia - zlyhanie Keep Alive")
         self.arq.output()
 
     def swap(self):
-        is_file = 0
-        # is_file = int(input(
-        #     ("Vyber si typ komunikacie:\n"
-        #      "   0   -   sprava\n"
-        #      "   1   -   subor\n")))
+        self.protocol.prepare_swap = False
+
+        is_file = int(input(
+            ("Vyber si typ komunikacie:\n"
+             "   0   -   sprava\n"
+             "   1   -   subor\n")))
         if is_file == 1:
             # file_name = input("zadaj absolutnu cestu k suboru: ")
             file_name = "C:\\Users\\patri\\pks\\zad_2\\pks_test.txt"
@@ -228,14 +231,14 @@ class Reciever:
             file_name = file_name[len(file_name) - file_name[::-1].index("\\"):]
         else:
             file_name = None
-            # message = input("Zadaj spravu ktoru chces poslat:\n")
-            message = """\
-        Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum nulla ornare, rutrum purus id, imperdiet libero. Curabitur eros lectus, blandit vitae justo malesuada, lacinia vulputate nisl. Maecenas et neque vitae neque imperdiet tempor id vel magna. Fusce magna neque, viverra a urna nec, egestas varius ex. Quisque vitae viverra massa. Proin lobortis facilisis metus vel semper. Duis cursus pulvinar euismod. Ut rhoncus porta nibh, a placerat velit commodo vel. Morbi ac urna dui. Nunc iaculis elementum odio et efficitur. Praesent bibendum eros eget neque bibendum ultrices sed sit amet est. Quisque venenatis turpis vel magna vestibulum convallis ac id erat. Donec fringilla eu ex cursus hendrerit. Nam lacinia a diam at blandit. Vestibulum et orci laoreet, eleifend tortor ut, faucibus ex.
-        Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.
-        Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
-        Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
-        Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur.
-        koniec"""
+            message = input("Zadaj spravu ktoru chces poslat:\n")
+            # message = """\
+        # Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum nulla ornare, rutrum purus id, imperdiet libero. Curabitur eros lectus, blandit vitae justo malesuada, lacinia vulputate nisl. Maecenas et neque vitae neque imperdiet tempor id vel magna. Fusce magna neque, viverra a urna nec, egestas varius ex. Quisque vitae viverra massa. Proin lobortis facilisis metus vel semper. Duis cursus pulvinar euismod. Ut rhoncus porta nibh, a placerat velit commodo vel. Morbi ac urna dui. Nunc iaculis elementum odio et efficitur. Praesent bibendum eros eget neque bibendum ultrices sed sit amet est. Quisque venenatis turpis vel magna vestibulum convallis ac id erat. Donec fringilla eu ex cursus hendrerit. Nam lacinia a diam at blandit. Vestibulum et orci laoreet, eleifend tortor ut, faucibus ex.
+        # Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.
+        # Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
+        # Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
+        # Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur.
+        # koniec"""
 
         # todo ak mame nieco na recieve, vsetko sa pokazi
         #  2 moznosti
@@ -258,7 +261,7 @@ class Reciever:
                 self.protocol.is_alive.append(False)
             print(self.protocol.is_alive)
 
-            # pocka kym je vlajka na posielanie znovu nastavena
+            # pocka kym je vlajka na posielanie nastavena
             if self.protocol.keep_alive_flag.wait():
                 time.sleep((interval - (time.monotonic() - start_time) % interval))
 
@@ -267,9 +270,11 @@ class Reciever:
 
 
 def main():
-    # HOST = '127.0.0.1'
-    HOST = ""  # na vsetkych adresach
-    PORT = 9053  # int(input("Zadaj port komunikácie: "))
+    HOST = ""  # pocuva na vsetkych adresach
+    PORT = 9053
+    # PORT = int(input("Zadaj port komunikácie")
+    # while not (1024 < PORT < 65536):
+    #     PORT = int(input("Zadaj port komunikácie")
 
     recv = Reciever(host=HOST, port=PORT)
     recv.comm_init()
