@@ -1,8 +1,9 @@
 import socket
+import sys
 import threading
 import time
 import selectors
-import random
+import select
 
 from LDProtocol import LDProtocol
 from CyclicRedundancyCheck import CRC
@@ -67,10 +68,10 @@ class Sender:
 
         if sock is None:
             self.comm_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.comm_socket.connect((host, port))
             self.comm_socket.setblocking(False)
         else:
             self.comm_socket = sock
+        self.comm_socket.connect((host, port))
 
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.comm_socket, selectors.EVENT_WRITE | selectors.EVENT_READ)
@@ -118,7 +119,7 @@ class Sender:
                 print("ukoncime pokus o spojenie...")
                 return
             if (message[0] & (LDProtocol.START | LDProtocol.ACK)) == (LDProtocol.START | LDProtocol.ACK):
-                self.alive_thread.start()
+                # self.alive_thread.start()  # todo
                 return self.send()
             elif (message[0] & (LDProtocol.START | LDProtocol.NACK)) == (LDProtocol.START | LDProtocol.NACK):
                 print("server neprijal nase spojenie")
@@ -132,7 +133,7 @@ class Sender:
 
     def send(self):
         self.comm_socket.setblocking(False)
-        packet_size = 1468  # todo packet size
+        packet_size = 1468
         # 1500 - 20 (ip header) - 8 (UDP header) - 4 (nas header)
         #  = 1468
 
@@ -145,26 +146,38 @@ class Sender:
                 print("stratili sme spojenie...")
                 break
 
-            events = self.selector.select()
+            events = self.selector.select(timeout=0)
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
                     # precitame 1 packet
                     self.read(key)
+
                 elif self.protocol.prepare_swap:
-                    # if not swap from self:
-                    #  self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
+                    # ak sa pripravujeme na swap, a uz nemame co citat, swapneme
+
+                    # ak sme swap request neodoslali my, akceptujeme ho
+                    if not self.protocol.sent_swap:
+                        self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
+
                     self.swap()
 
-                if mask & selectors.EVENT_WRITE and not self.protocol.prepare_swap:
+                # ak pripravujeme swap, nic neodosleme
+                if mask & selectors.EVENT_WRITE and not (self.protocol.prepare_swap or self.protocol.sent_swap):
                     # odosleme max 1 packet
                     self.write(packet_size)
 
-            # if self.datagrams and self.protocol.prepare_swap:
-            #     # sme pripraveny na swap
-            #     self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]))
-            #     self.swap()
+            # selektor na input
+            read, _, _ = select.select([sys.stdin], [], [], 0)
 
-            if not self.datagrams and self.last_sent_index >= len(self.message):
+            # ak uz pripravujeme swap, neodosleme iny swap request
+            if read and not (self.protocol.prepare_swap or self.protocol.sent_swap):
+                sys.stdin.readline()
+
+                self.protocol.sent_swap = True
+                self.send_data(bytes([LDProtocol.SWAP, 0, 0, 0]))
+
+            if (not self.datagrams and self.last_sent_index >= len(self.message)
+                    and not (self.protocol.sent_swap or self.protocol.prepare_swap)):
                 # ak sme odoslali celu spravu a uz nic neocakava znovu odoslabie
                 return self.end_comm()
 
@@ -172,7 +185,7 @@ class Sender:
         conn = key.fileobj
 
         # dostaneme naspat hlavicku s nulovym checksum
-        message = conn.recv(4)
+        message = conn.recv(1473)
 
         if ((message[0] & (LDProtocol.KEEP_ALIVE | LDProtocol.ACK))
                 == (LDProtocol.KEEP_ALIVE | LDProtocol.ACK)):
@@ -180,14 +193,9 @@ class Sender:
             with self.protocol.alive_lock:
                 self.protocol.is_alive[-1] = True
 
-        elif ((message[0] & (LDProtocol.SWAP | LDProtocol.ACK))
-              == (LDProtocol.SWAP | LDProtocol.ACK)):
-            # todo nie je toto full pepe?
-            # ak sme dostali odpoved na swap, swapneme
-            self.swap()
-
         elif message[0] & LDProtocol.SWAP:
-            # ak sme dostali poziadavku na swap, zacneme sa pripravovat sa na swap
+            # ak sme dostali poziadavku alebo odpoved na swap
+            # zacneme sa pripravovat sa na swap
             self.protocol.prepare_swap = True
 
         elif message[0] & LDProtocol.ACK:
@@ -196,6 +204,8 @@ class Sender:
             # zistime na ktory packet z okna sme prijali odpoved
             k = message[1]
             packet = self.datagrams.get(k)
+
+            # ak packet nie je v okne, ignorujeme ho
             if packet is None:
                 return
             packet.ack = True
@@ -211,7 +221,7 @@ class Sender:
             # nasledne tieto packety odstranime z okna
             start = next(iter(self.datagrams))
             for i in range(j):
-                self.datagrams.pop((start+i) % LDProtocol.BUFFER_SIZE)
+                self.datagrams.pop((start + i) % LDProtocol.BUFFER_SIZE)
 
         elif message[0] & LDProtocol.NACK:
             # zaporna odpoved na packet
@@ -220,21 +230,19 @@ class Sender:
             k = message[1]
             packet = self.datagrams.get(k)
 
+            # ak packet nie je v okne, ignorujeme ho
             if packet is None:
                 return
 
             packet.stop_timer()
             packet.reschedule()
 
-    def write(self, packet_size):
-        if packet_size == -1:
-            # SWAP posielame ak je poziadavka na packet o velkosti -1
-            print("SWAP request sent")
-            self.send_data(bytes([LDProtocol.SWAP, 0, 0, 0]))
-            self.protocol.prepare_swap = True
-            return
+        elif message[0] == 0:
+            # ak prijmeme datovy packet, ignorujeme ho
+            pass
 
-        elif len(self.protocol.to_resend) != 0:
+    def write(self, packet_size):
+        if len(self.protocol.to_resend) != 0:
             # pokusime sa opatovne poslat stary packet
 
             # print(f"resend: ")
@@ -258,8 +266,7 @@ class Sender:
                 return
             # inak sa pokusime poslat novy packet
 
-        if (not self.protocol.prepare_swap
-                and len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message)):
+        if len(self.datagrams) < LDProtocol.WINDOW_SIZE and self.last_sent_index < len(self.message):
             # alebo poslem novy
             flags = 0
 
@@ -280,14 +287,12 @@ class Sender:
     def swap(self):
         self.protocol.prepare_swap = False
         self.protocol.confirmed_swap = False
-        # precital poznamku u odosielatela
-        # pozastavime alive_thread
-        # zapneme vlastneho prijimatela
-        # po ukonceni prijimatela znovu zapneme alive_thread
         self.protocol.keep_alive_flag.clear()
-        # todo prepneme sa na prijimatela
+
         novy = prijmatel.Reciever(sock=self.comm_socket.dup())
+        novy.dest_socket = self.comm_socket.getpeername()
         novy.recieve()
+
         self.protocol.keep_alive_flag.set()
 
     def keep_alive(self):
@@ -305,7 +310,7 @@ class Sender:
             with self.protocol.alive_lock:
                 self.protocol.is_alive.pop(0)
                 self.protocol.is_alive.append(False)
-            print(self.protocol.is_alive)
+            # print(self.protocol.is_alive)
 
             # pocka kym je vlajka na posielanie znovu nastavena
             if self.protocol.keep_alive_flag.wait():
@@ -322,12 +327,10 @@ def true_interval(interval, start):
 def main():
     # todo znovu povolit vyber
     HOST = input("Zadaj cieľovú adresu: ")
-    # 169.254.137.15
-    # HOST = '127.0.0.1'
-    PORT = 9053
-    # PORT = int(input("Zadaj cieľový port")
+    PORT = 9054
+    # PORT = int(input("Zadaj platný cieľový port komunikácie: ")
     # while not (1024 < PORT < 65536):
-    #     PORT = int(input("Zadaj cieľový port")
+    #     PORT = int(input("Zadaj platný cieľový port komunikácie: ")
 
     is_file = 1
     # is_file = int(input(

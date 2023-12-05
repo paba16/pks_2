@@ -1,7 +1,9 @@
 import selectors
+import select
 import socket
 import threading
 import time
+import sys
 
 from CyclicRedundancyCheck import CRC
 from LDProtocol import LDProtocol
@@ -140,20 +142,22 @@ class Reciever:
                 self.send_data(bytes([LDProtocol.START | LDProtocol.ACK, 0, 0, 0]), source)
 
                 # zapneme odpocitavanie Keep Alive
-                self.alive_thread.start()
+                # self.alive_thread.start() # todo
 
                 return self.recieve()
             else:
                 print("prisiel non-START packet...")
 
     def recieve(self):
+        self.swap_thread.start()
+
         selektor = selectors.DefaultSelector()
         selektor.register(self.server, selectors.EVENT_READ)
         self.server.setblocking(False)
 
+        mask = 0
         while any(self.protocol.is_alive):
-            # todo ako si ma "zmysliet" ze chce poslat swap?
-            events = selektor.select()
+            events = selektor.select(timeout=0)
 
             for key, mask in events:
                 if mask & selectors.EVENT_READ:
@@ -171,10 +175,11 @@ class Reciever:
 
                         # posle spat Keep alive
                         self.send_data(bytes([LDProtocol.KEEP_ALIVE | LDProtocol.ACK, 0, 0, 0]), source)
-                        print("recieved Keep Alive")
 
                     elif message[0] & LDProtocol.SWAP:
-                        # todo priprav swap?
+                        # ak dostaneme packet so značkou swap, začneme sa pripravovať na swap
+                        # nezáleží, čí ide o swap alebo swap ack
+                        # ak sa nám nepodarí čítanie v následujúcom cykle, prepneme
                         self.protocol.prepare_swap = True
 
                     elif message[0] & LDProtocol.FIN:
@@ -186,32 +191,48 @@ class Reciever:
                         self.arq.output()
                         return
 
-                    elif message[0] == 0:
+                    elif message[0] == 0 and not (self.protocol.sent_swap or self.protocol.prepare_swap):
                         # ak nie su nastavene ziadne znacky, povazujeme packet za datovy
                         if self.debug:
                             # ak je nastaveny debug, zmeni prvu spravu pre kontrolu CRC
                             message += b"PKS"
                             self.debug = False
+
                         response = self.arq.check(message)
-                        if response[0] & LDProtocol.ACK:
-                            # print(f"good: {message[1]}")
-                            pass
-                        else:
-                            print(f"bad:  {message[1]}")
+                        # debug vypise cislo packetu a ci bol uspesne prijaty
+                        # if response[0] & LDProtocol.ACK:
+                        #     print(f"good: {message[1]}")
+                        #     pass
+                        # else:
+                        #     print(f"bad:  {message[1]}")
 
                         self.send_data(response, source)
-                elif self.protocol.prepare_swap:
-                    # todo swap
-                    self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), source)
 
-                    self.swap()
-                    pass
+            # ak sme ziadny packet neprijali, swapneme
+            if not (mask & selectors.EVENT_READ) and self.protocol.prepare_swap:
+                # ak sme neposlali swap request, odosleme swap ack
+                if not self.protocol.sent_swap:
+                    self.send_data(bytes([LDProtocol.SWAP | LDProtocol.ACK, 0, 0, 0]), self.dest_socket)
+
+                self.swap()
+
+            # selektor na input
+            read, _, _ = select.select([sys.stdin], [], [], 0)
+
+            # ak uz pripravujeme swap, neodosleme iny swap request
+            if read and not (self.protocol.prepare_swap or self.protocol.sent_swap):
+                sys.stdin.readline()
+
+                self.protocol.sent_swap = True
+                self.send_data(bytes([LDProtocol.SWAP, 0, 0, 0]), self.dest_socket)
+
+
 
         print("neuspesne ukoncena komunikacia - zlyhanie Keep Alive")
         self.arq.output()
 
     def swap(self):
-        self.protocol.prepare_swap = False
+        self.protocol.keep_alive_flag.clear()
 
         is_file = int(input(
             ("Vyber si typ komunikacie:\n"
@@ -228,25 +249,14 @@ class Reciever:
         else:
             file_name = None
             message = input("Zadaj spravu ktoru chces poslat:\n")
-            # message = """\
-        # Lorem ipsum dolor sit amet, consectetur adipiscing elit. Curabitur interdum nulla ornare, rutrum purus id, imperdiet libero. Curabitur eros lectus, blandit vitae justo malesuada, lacinia vulputate nisl. Maecenas et neque vitae neque imperdiet tempor id vel magna. Fusce magna neque, viverra a urna nec, egestas varius ex. Quisque vitae viverra massa. Proin lobortis facilisis metus vel semper. Duis cursus pulvinar euismod. Ut rhoncus porta nibh, a placerat velit commodo vel. Morbi ac urna dui. Nunc iaculis elementum odio et efficitur. Praesent bibendum eros eget neque bibendum ultrices sed sit amet est. Quisque venenatis turpis vel magna vestibulum convallis ac id erat. Donec fringilla eu ex cursus hendrerit. Nam lacinia a diam at blandit. Vestibulum et orci laoreet, eleifend tortor ut, faucibus ex.
-        # Donec vel imperdiet tellus, et bibendum augue. Curabitur non sodales est. Donec imperdiet dictum felis a blandit. Donec dictum et nibh ac pretium. Donec placerat porta turpis, convallis elementum lorem fringilla tristique. Donec luctus elementum gravida. Nam eget metus eros. Maecenas nec porta risus. Maecenas vitae purus tincidunt nulla tempor congue ac et erat.
-        # Phasellus tempor vitae sapien ut finibus. Donec lectus urna, dignissim sed nunc ut, tincidunt finibus nulla. Sed venenatis erat et facilisis iaculis. Fusce convallis justo eu lectus consequat sagittis eu vel nulla. Sed nec pharetra neque, eu sodales lectus. Duis tristique nec tellus ac pharetra. Nulla sapien leo, sagittis in posuere non, consequat in lorem. Pellentesque eu pellentesque velit. In odio arcu, maximus et pulvinar at, ullamcorper eget dui.
-        # Pellentesque porta ligula nec metus rhoncus efficitur. Quisque et est laoreet, facilisis diam a, faucibus tellus. Nam vel accumsan est. Aenean eu aliquet lorem. Duis et mi ornare, feugiat justo tempor, vulputate tellus. Suspendisse pharetra tellus a nulla iaculis, eget euismod felis malesuada. Proin ut pretium quam, quis fringilla ante. Donec sit amet metus vel massa aliquet luctus. Vestibulum lorem dui, efficitur at feugiat quis, sodales ut mi. Cras tincidunt tempus sapien, vitae ultricies tellus pharetra eget. In lectus felis, scelerisque nec volutpat et, posuere vitae ligula. Nulla ligula odio, ullamcorper sit amet sem sed, convallis mollis tortor. Pellentesque ultrices placerat ligula in condimentum. Integer cursus fringilla arcu at varius. In lobortis eget lectus vel ornare.
-        # Nulla pulvinar faucibus velit. Phasellus eget urna eu tellus lacinia mollis. Mauris malesuada iaculis faucibus. Sed dignissim egestas purus eu aliquet. Proin rhoncus vestibulum dolor, nec malesuada libero posuere et. Cras elementum diam et lectus finibus pharetra. Donec hendrerit lectus accumsan lectus luctus condimentum. Nulla posuere efficitur mi, id placerat nulla posuere vitae. In eu diam congue, tempus nisl vel, lobortis leo. Morbi malesuada fermentum felis sed interdum. Vivamus eleifend tellus vel turpis rhoncus varius eu ac massa. Integer quis dolor non dui congue semper. Phasellus et libero dictum, imperdiet tortor nec, auctor justo. Aliquam molestie urna sit amet mi ultricies accumsan id sed leo. Pellentesque quis leo at dui bibendum efficitur. Nullam mollis justo at congue efficitur.
-        # koniec"""
 
-        # todo ak mame nieco na recieve, vsetko sa pokazi
-        #  2 moznosti
-        #   1. vyprazdnit bufffer
-        #   2. tu riesime swap od sendera. U sendera nastavime aby iba cital
-        #       ak nema co citat, akceptujeme swap a swapneme
-        #       -
-        #       swap od nas by znamenal fungovanie nadalej kym nedostaneme SWAP ACK
-        #       na strane odosielatela by sme iba spracovali vsetky odpovede a poslali SWAP ACP a swapli
-
-        novy = odosielatel.Sender(message=message, file_name=file_name, sock=self.server.dup())
+        host, port = self.dest_socket
+        novy = odosielatel.Sender(host=host, port=port, message=message, file_name=file_name, sock=self.server.dup())
         novy.send()
+
+        self.protocol.prepare_swap = False
+        self.protocol.sent_swap = False
+        self.protocol.keep_alive_flag.set()
 
     def alive_countdown(self):
         interval = 5
@@ -255,7 +265,7 @@ class Reciever:
             with self.protocol.alive_lock:
                 self.protocol.is_alive.pop(0)
                 self.protocol.is_alive.append(False)
-            print(self.protocol.is_alive)
+            # print(self.protocol.is_alive)
 
             # pocka kym je vlajka na posielanie nastavena
             if self.protocol.keep_alive_flag.wait():
@@ -267,7 +277,7 @@ class Reciever:
 
 def main():
     HOST = ""  # pocuva na vsetkych adresach
-    PORT = 9053
+    PORT = 9054
     # PORT = int(input("Zadaj port komunikácie")
     # while not (1024 < PORT < 65536):
     #     PORT = int(input("Zadaj port komunikácie")

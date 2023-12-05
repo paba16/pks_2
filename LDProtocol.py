@@ -15,6 +15,7 @@ class LDProtocol:
 
     def __init__(self, rtt):
         self.rtt = rtt
+        self.sent_swap = False
         self.prepare_swap = False
 
         self.resend_lock = threading.Lock()
